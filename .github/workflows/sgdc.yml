@@ -1,0 +1,27 @@
+# Trae las cargas del SGDC (Power BI) a Firestore una vez por hora.
+# Secretos: FIREBASE_SERVICE_ACCOUNT.
+name: Sincronizar SGDC
+
+on:
+  schedule:
+    # El Power BI actualiza ~:27/:32: se revisa a las :40.
+    - cron: '40 * * * *'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Instalar
+        working-directory: tools
+        run: npm install --no-audit --no-fund
+      - name: Traer SGDC
+        working-directory: tools
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: node sgdc_sync.mjs --solo-sgdc

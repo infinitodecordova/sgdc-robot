@@ -1,0 +1,32 @@
+# Trae el SoC de digiCAR a Firestore cada 5 minutos (GitHub a veces atrasa unos minutos).
+# Secretos: FIREBASE_SERVICE_ACCOUNT, DIGICAR_USUARIO y DIGICAR_CLAVE.
+name: Sincronizar digiCAR
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: digicar
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Instalar
+        working-directory: tools
+        run: npm install --no-audit --no-fund
+      - name: Traer SoC de digiCAR
+        working-directory: tools
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          DIGICAR_USUARIO: ${{ secrets.DIGICAR_USUARIO }}
+          DIGICAR_CLAVE: ${{ secrets.DIGICAR_CLAVE }}
+        run: node sgdc_sync.mjs --solo-digicar

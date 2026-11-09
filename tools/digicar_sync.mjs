@@ -1,0 +1,293 @@
+// Trae el SoC real de los buses de Camilo Henríquez desde digiCAR (ThingsBoard)
+// y lo deja en Firestore (colección "digicar", un documento por PPU).
+//
+// Los tokens de digiCAR NUNCA van en un archivo: se pasan por variables de entorno.
+//   DIGICAR_REFRESH_TOKEN: el "refresh_token" de la sesión (dura 7 días y el robot lo renueva solo).
+//   DIGICAR_TOKEN: el "jwt_token" (dura ~2 h; solo para probar).
+//
+// Probar en el PC (no sube nada, solo muestra):
+//   read -s DIGICAR_REFRESH_TOKEN && export DIGICAR_REFRESH_TOKEN   (pega y Enter; no se ve)
+//   node digicar_sync.mjs --probar
+//
+// Subir a Firestore:
+//   node digicar_sync.mjs serviceAccount.json
+//
+// En GitHub Actions: secretos DIGICAR_TOKEN y FIREBASE_SERVICE_ACCOUNT.
+
+import { readFileSync } from 'node:fs';
+import readline from 'node:readline';
+import { fileURLToPath } from 'node:url';
+
+const BASE = 'https://visual.digicar.cl';
+const AVISAR_VENCE_DIAS = 15;
+
+const ppuClave = (s) => String(s ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+const num = (v) => {
+  const n = parseFloat(String(v ?? '').replace(',', '.'));
+  return Number.isFinite(n) ? Math.round(n * 10) / 10 : null;
+};
+
+/// Fecha de vencimiento del token (va dentro del mismo token, no hay que preguntarla).
+function venceToken(token) {
+  try {
+    const p = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'));
+    return p.exp ? new Date(p.exp * 1000) : null;
+  } catch {
+    return null;
+  }
+}
+
+const limpiar = (t) => String(t ?? '').trim().replace(/^Bearer\s+/i, '').replace(/^"|"$/g, '');
+
+/// Consigue un token de acceso vigente.
+/// - DIGICAR_TOKEN: token de sesión directo (dura ~2 h; sirve para probar).
+/// - Si no, usa el "refresh token" (dura 7 días y se renueva solo cada vez que se usa):
+///   se toma el más nuevo entre el secreto DIGICAR_REFRESH_TOKEN y el guardado en
+///   Firestore (privado/digicar, que la app no puede leer), y se guarda el renovado.
+async function obtenerToken(db) {
+  // 1) Usuario y contraseña (lo normal en el robot): inicia sesión en cada pasada.
+  const usuario = (process.env.DIGICAR_USUARIO ?? '').trim();
+  const clave = process.env.DIGICAR_CLAVE ?? '';
+  if (usuario && clave) {
+    const r = await fetch(`${BASE}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ username: usuario, password: clave }),
+    });
+    if (r.status === 401) {
+      throw new Error('digiCAR respondió 401 al iniciar sesión: usuario o contraseña de digiCAR incorrectos (¿cambiaron la contraseña?)');
+    }
+    if (!r.ok) throw new Error(`digiCAR respondió ${r.status} al iniciar sesión: ${(await r.text()).slice(0, 200)}`);
+    const j = await r.json();
+    if (!j.token) throw new Error('digiCAR no devolvió token al iniciar sesión');
+    return { token: j.token, vence: null, fuente: 'usuario y contraseña' };
+  }
+
+  // 2) Token directo o refresh token (respaldo).
+  const directo = limpiar(process.env.DIGICAR_TOKEN);
+  if (directo) {
+    const v = venceToken(directo);
+    if (!v || v > new Date()) return { token: directo, vence: v, fuente: 'token directo' };
+    console.log('digiCAR: el DIGICAR_TOKEN ya venció, pruebo con el refresh token.');
+  }
+
+  const candidatos = [];
+  const deSecreto = limpiar(process.env.DIGICAR_REFRESH_TOKEN);
+  if (deSecreto) candidatos.push(deSecreto);
+  let ref = null;
+  if (db) {
+    ref = db.doc('privado/digicar');
+    const d = await ref.get();
+    if (d.exists && d.data().refreshToken) candidatos.push(d.data().refreshToken);
+  }
+  const vigentes = candidatos
+    .map((t) => ({ t, v: venceToken(t) }))
+    .filter((x) => !x.v || x.v > new Date())
+    .sort((a, b) => (b.v?.getTime() ?? 0) - (a.v?.getTime() ?? 0));
+  if (!vigentes.length) {
+    if (!candidatos.length) return null;
+    throw new Error('digiCAR: el refresh token venció (pasó más de 7 días sin renovarse)');
+  }
+
+  const r = await fetch(`${BASE}/api/auth/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ refreshToken: vigentes[0].t }),
+  });
+  if (r.status === 401) throw new Error('digiCAR respondió 401 al renovar: el refresh token venció o lo anularon');
+  if (!r.ok) throw new Error(`digiCAR respondió ${r.status} al renovar: ${(await r.text()).slice(0, 200)}`);
+  const j = await r.json();
+  if (!j.token) throw new Error('digiCAR no devolvió token al renovar');
+  if (ref && j.refreshToken) {
+    const { FieldValue, Timestamp } = await import('firebase-admin/firestore');
+    const v = venceToken(j.refreshToken);
+    await ref.set({
+      refreshToken: j.refreshToken,
+      vence: v ? Timestamp.fromDate(v) : null,
+      renovado: FieldValue.serverTimestamp(),
+    });
+  }
+  return { token: j.token, vence: venceToken(j.refreshToken ?? ''), fuente: 'refresh token' };
+}
+
+/// Todos los buses que el usuario ve en digiCAR, con su nombre y último SoC.
+async function consultarDigicar(token) {
+  const filas = [];
+  for (let page = 0; page < 20; page++) {
+    const r = await fetch(`${BASE}/api/entitiesQuery/find`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        'X-Authorization': `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        entityFilter: { type: 'entityType', resolveMultiple: true, entityType: 'DEVICE' },
+        pageLink: {
+          page,
+          pageSize: 500,
+          sortOrder: { key: { type: 'ENTITY_FIELD', key: 'name' }, direction: 'ASC' },
+        },
+        entityFields: [
+          { type: 'ENTITY_FIELD', key: 'name' },
+          { type: 'ENTITY_FIELD', key: 'label' },
+        ],
+        latestValues: [
+          { type: 'TIME_SERIES', key: 'DigicarSoc' },
+          { type: 'TIME_SERIES', key: 'DigicarOdometer' },
+        ],
+      }),
+    });
+    if (r.status === 401) throw new Error('digiCAR respondió 401: el token de digiCAR venció o lo anularon');
+    if (r.status === 403) throw new Error('digiCAR respondió 403: el token de digiCAR no tiene permiso para ver los buses');
+    if (!r.ok) throw new Error(`digiCAR respondió ${r.status}: ${(await r.text()).slice(0, 300)}`);
+    const j = await r.json();
+    for (const d of j.data ?? []) {
+      const f = d.latest?.ENTITY_FIELD ?? {};
+      const t = d.latest?.TIME_SERIES ?? {};
+      filas.push({
+        id: d.entityId?.id,
+        nombre: f.name?.value ?? '',
+        etiqueta: f.label?.value ?? '',
+        soc: num(t.DigicarSoc?.value),
+        socTs: t.DigicarSoc?.ts ? new Date(Number(t.DigicarSoc.ts)) : null,
+        odometro: num(t.DigicarOdometer?.value),
+      });
+    }
+    if (!j.hasNext) break;
+  }
+  return filas;
+}
+
+/// Encuentra la PPU del bus: puede venir en el nombre o en la etiqueta del equipo.
+function ppuDe(fila, flota) {
+  for (const texto of [fila.nombre, fila.etiqueta]) {
+    const k = ppuClave(texto);
+    if (flota.has(k)) return k;
+    // por si el nombre trae algo más, ej. "SPBF-22 (Foton)"
+    for (const p of flota) if (k.includes(p)) return p;
+  }
+  return null;
+}
+
+/// Pregunta en la terminal (la contraseña no se ve al escribir/pegar).
+export function preguntar(texto, oculto = false) {
+  return new Promise((ok) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+    if (oculto) {
+      rl._writeToOutput = (s) => {
+        if (s.includes(texto)) rl.output.write(texto);
+      };
+    }
+    rl.question(texto, (r) => {
+      rl.close();
+      if (oculto) process.stdout.write('\n');
+      ok(r.trim());
+    });
+  });
+}
+
+/// Para probar en el PC: si no hay credenciales en el ambiente, las pide.
+export async function pedirCredencialesSiFaltan() {
+  if (process.env.DIGICAR_USUARIO && process.env.DIGICAR_CLAVE) return;
+  if (process.env.DIGICAR_TOKEN || process.env.DIGICAR_REFRESH_TOKEN) return;
+  if (!process.stdin.isTTY) return;
+  process.env.DIGICAR_USUARIO = await preguntar('Usuario (correo) de digiCAR: ');
+  process.env.DIGICAR_CLAVE = await preguntar('Contraseña de digiCAR (no se ve): ', true);
+}
+
+export async function sincronizarDigicar({ db, dbToken = null, probar = false, flota = null }) {
+  const acceso = await obtenerToken(dbToken ?? db);
+  if (!acceso) {
+    console.log('digiCAR: sin credenciales (DIGICAR_USUARIO y DIGICAR_CLAVE), se omite.');
+    return null;
+  }
+  const { token, fuente } = acceso;
+  const vence = fuente === 'token directo' ? acceso.vence : null; // el refresh se renueva solo
+  console.log(`digiCAR: usando ${fuente}.`);
+  const filas = await consultarDigicar(token);
+  const conSoc = filas.filter((f) => f.soc != null);
+  console.log(`digiCAR: ${filas.length} buses visibles, ${conSoc.length} con SoC.` +
+    (vence ? ` Token vence: ${vence.toLocaleDateString('es-CL', { timeZone: 'America/Santiago' })}` : ''));
+
+  if (probar) {
+    console.log('Ejemplos (nombre | etiqueta | SoC | hora):');
+    const nuestros = filas.filter((f) => /^SR/.test(ppuClave(f.nombre)) || /^SR/.test(ppuClave(f.etiqueta)));
+    for (const f of (nuestros.length ? nuestros : filas).slice(0, 12)) {
+      console.log(`  ${f.nombre} | ${f.etiqueta} | ${f.soc ?? '-'}% | ` +
+        `${f.socTs?.toLocaleString('es-CL', { timeZone: 'America/Santiago' }) ?? '-'}`);
+    }
+  }
+
+  // Nuestra flota: las PPU del semáforo (o todas si se está probando sin Firestore).
+  let mios = filas;
+  if (flota) {
+    mios = [];
+    for (const f of filas) {
+      const ppu = ppuDe(f, flota);
+      if (ppu) mios.push({ ...f, ppu });
+    }
+    console.log(`digiCAR: ${mios.length} de ${flota.size} buses de Camilo Henríquez encontrados.`);
+  }
+  if (probar || !db) return { vence, filas: mios };
+
+  const { FieldValue, Timestamp } = await import('firebase-admin/firestore');
+  const batch = db.batch();
+  // Todos los buses van en UN solo documento (digicar/flota): 1 escritura por pasada,
+  // aunque corra cada 5 minutos (288 escrituras al día en vez de ~14.000).
+  const buses = {};
+  for (const f of mios) {
+    if (f.soc == null) continue;
+    buses[f.ppu] = {
+      soc: f.soc,
+      fecha: f.socTs ? Timestamp.fromDate(f.socTs) : null,
+      odometro: f.odometro,
+    };
+  }
+  const n = Object.keys(buses).length;
+  batch.set(db.collection('digicar').doc('flota'), { buses, actualizado: FieldValue.serverTimestamp() });
+  batch.set(db.doc('config/digicar'), {
+    ultimaSync: FieldValue.serverTimestamp(),
+    buses: mios.length,
+    tokenVence: vence ? Timestamp.fromDate(vence) : null,
+  }, { merge: true });
+  await batch.commit();
+  console.log(`digiCAR: SoC de ${n} buses guardado en Firestore.`);
+
+  if (vence && vence - Date.now() > 86400000) {
+    const dias = Math.floor((vence - Date.now()) / 86400000);
+    if (dias <= AVISAR_VENCE_DIAS) {
+      const e = new Error(`El token de digiCAR vence en ${dias} días ` +
+        `(${vence.toLocaleDateString('es-CL', { timeZone: 'America/Santiago' })}).`);
+      e.soloAviso = true;
+      throw e;
+    }
+  }
+  return { vence, filas: mios };
+}
+
+// ---------------------------------------------------------------- Uso directo
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  const args = process.argv.slice(2);
+  const probar = args.includes('--probar');
+  const llave = args.find((a) => !a.startsWith('--'));
+  (async () => {
+    let db = null;
+    let admin = null;
+    let flota = null;
+    if (!probar || llave) {
+      admin = (await import('firebase-admin')).default;
+      const cred = process.env.FIREBASE_SERVICE_ACCOUNT
+        ? JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
+        : JSON.parse(readFileSync(llave ?? 'serviceAccount.json', 'utf8'));
+      admin.initializeApp({ credential: admin.credential.cert(cred) });
+      db = admin.firestore();
+      const s = await db.collection('semaforoch').get();
+      flota = new Set(s.docs.map((d) => ppuClave(d.data().ppu ?? d.id)));
+    }
+    await sincronizarDigicar({ db: probar ? null : db, dbToken: db, probar, flota });
+  })().catch((e) => {
+    console.error('Falló digiCAR:', e.message);
+    process.exit(1);
+  });
+}

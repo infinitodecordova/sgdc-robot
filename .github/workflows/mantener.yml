@@ -1,0 +1,22 @@
+# En repos públicos GitHub apaga las tareas programadas si pasan 60 días sin cambios.
+# Esto hace un commit vacío el día 1 de cada mes para que sigan corriendo.
+name: Mantener activo
+
+on:
+  schedule:
+    - cron: '17 12 1 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  latido:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: |
+          git config user.name "robot"
+          git config user.email "robot@users.noreply.github.com"
+          git commit --allow-empty -m "Mantener activo $(date +%F)"
+          git push

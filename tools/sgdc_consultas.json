@@ -1,0 +1,860 @@
+{
+ "_info": "Consultas copiadas del reporte público de Power BI (SGDC). No contienen claves.",
+ "url": "https://wabi-south-central-us-c-primary-api.analysis.windows.net/public/reports/querydata?synchronous=true",
+ "resourceKey": "c448e091-183a-46f2-88b6-5731e93ae01b",
+ "cargas": {
+  "version": "1.0.0",
+  "queries": [
+   {
+    "Query": {
+     "Commands": [
+      {
+       "SemanticQueryDataShapeCommand": {
+        "Query": {
+         "Version": 2,
+         "From": [
+          {
+           "Name": "c",
+           "Entity": "cargas",
+           "Type": 0
+          },
+          {
+           "Name": "c1",
+           "Entity": "cargas_detalle",
+           "Type": 0
+          }
+         ],
+         "Select": [
+          {
+           "Column": {
+            "Expression": {
+             "SourceRef": {
+              "Source": "c"
+             }
+            },
+            "Property": "secuencia_id"
+           },
+           "Name": "cargas_hist.secuencia_id",
+           "NativeReferenceName": "ID1"
+          },
+          {
+           "Column": {
+            "Expression": {
+             "SourceRef": {
+              "Source": "c"
+             }
+            },
+            "Property": "terminal"
+           },
+           "Name": "cargas_hist.terminal",
+           "NativeReferenceName": "Terminal"
+          },
+          {
+           "Column": {
+            "Expression": {
+             "SourceRef": {
+              "Source": "c"
+             }
+            },
+            "Property": "pistola"
+           },
+           "Name": "cargas_hist.pistola",
+           "NativeReferenceName": "Pistola"
+          },
+          {
+           "Column": {
+            "Expression": {
+             "SourceRef": {
+              "Source": "c"
+             }
+            },
+            "Property": "hr_reserva"
+           },
+           "Name": "cargas_hist.hr_reserva",
+           "NativeReferenceName": "Hr reserva1"
+          },
+          {
+           "Column": {
+            "Expression": {
+             "SourceRef": {
+              "Source": "c"
+             }
+            },
+            "Property": "hr_inicio_carga"
+           },
+           "Name": "cargas_hist.hr_inicio_carga",
+           "NativeReferenceName": "Hr inicio carga"
+          },
+          {
+           "Column": {
+            "Expression": {
+             "SourceRef": {
+              "Source": "c"
+             }
+            },
+            "Property": "hr_fin_carga"
+           },
+           "Name": "cargas_hist.hr_fin_carga",
+           "NativeReferenceName": "Hr fin carga"
+          },
+          {
+           "Column": {
+            "Expression": {
+             "SourceRef": {
+              "Source": "c"
+             }
+            },
+            "Property": "hr_detencion"
+           },
+           "Name": "cargas_hist.hr_detencion",
+           "NativeReferenceName": "Hr detención"
+          },
+          {
+           "Column": {
+            "Expression": {
+             "SourceRef": {
+              "Source": "c"
+             }
+            },
+            "Property": "ppu"
+           },
+           "Name": "cargas_hist.ppu",
+           "NativeReferenceName": "PPU"
+          },
+          {
+           "Column": {
+            "Expression": {
+             "SourceRef": {
+              "Source": "c"
+             }
+            },
+            "Property": "modelo_bus"
+           },
+           "Name": "cargas_hist.modelo_bus",
+           "NativeReferenceName": "Modelo bus1"
+          },
+          {
+           "Column": {
+            "Expression": {
+             "SourceRef": {
+              "Source": "c"
+             }
+            },
+            "Property": "soc_inicio"
+           },
+           "Name": "Sum(cargas_hist.soc_inicio)",
+           "NativeReferenceName": "SOC inicial1"
+          },
+          {
+           "Column": {
+            "Expression": {
+             "SourceRef": {
+              "Source": "c"
+             }
+            },
+            "Property": "soc_fin"
+           },
+           "Name": "Sum(cargas_hist.soc_fin)",
+           "NativeReferenceName": "SOC final1"
+          },
+          {
+           "Column": {
+            "Expression": {
+             "SourceRef": {
+              "Source": "c"
+             }
+            },
+            "Property": "estado_carga"
+           },
+           "Name": "cargas_hist.Estado carga",
+           "NativeReferenceName": "Estado carga"
+          },
+          {
+           "Column": {
+            "Expression": {
+             "SourceRef": {
+              "Source": "c"
+             }
+            },
+            "Property": "soh"
+           },
+           "Name": "Sum(cargas_hist.soh)",
+           "NativeReferenceName": "SOH"
+          },
+          {
+           "Column": {
+            "Expression": {
+             "SourceRef": {
+              "Source": "c"
+             }
+            },
+            "Property": "tiempo_carga"
+           },
+           "Name": "Sum(cargas_hist.tiempo_carga)",
+           "NativeReferenceName": "Tiempo carga"
+          },
+          {
+           "Column": {
+            "Expression": {
+             "SourceRef": {
+              "Source": "c"
+             }
+            },
+            "Property": "soc_carga"
+           },
+           "Name": "Sum(cargas_hist.soc_carga)",
+           "NativeReferenceName": "SOC cargado"
+          },
+          {
+           "Column": {
+            "Expression": {
+             "SourceRef": {
+              "Source": "c"
+             }
+            },
+            "Property": "kwh_carga"
+           },
+           "Name": "Sum(cargas_hist.kwh_carga)",
+           "NativeReferenceName": "Consumo [kWh]1"
+          },
+          {
+           "Column": {
+            "Expression": {
+             "SourceRef": {
+              "Source": "c"
+             }
+            },
+            "Property": "kwh_carga_teracal"
+           },
+           "Name": "Sum(cargas.kwh_carga_teracal)",
+           "NativeReferenceName": "Consumo [teraCal]"
+          },
+          {
+           "Column": {
+            "Expression": {
+             "SourceRef": {
+              "Source": "c"
+             }
+            },
+            "Property": "dt_reg_cargador_baja_p"
+           },
+           "Name": "Sum(cargas_hist.dt_reg_cargador_baja_p)",
+           "NativeReferenceName": "Tiempo reg. cargador (BP)"
+          },
+          {
+           "Column": {
+            "Expression": {
+             "SourceRef": {
+              "Source": "c"
+             }
+            },
+            "Property": "dt_reg_cargador_sube_p"
+           },
+           "Name": "Sum(cargas_hist.dt_reg_cargador_sube_p)",
+           "NativeReferenceName": "Tiempo reg. cargador (SP)"
+          },
+          {
+           "Column": {
+            "Expression": {
+             "SourceRef": {
+              "Source": "c"
+             }
+            },
+            "Property": "dt_reg_bus"
+           },
+           "Name": "Sum(cargas_hist.dt_reg_bus)",
+           "NativeReferenceName": "Tiempo reg. bus"
+          },
+          {
+           "Column": {
+            "Expression": {
+             "SourceRef": {
+              "Source": "c"
+             }
+            },
+            "Property": "servicio_exp_ant"
+           },
+           "Name": "cargas_hist.Servicio Anterior",
+           "NativeReferenceName": "Servicio exp anterior"
+          },
+          {
+           "Column": {
+            "Expression": {
+             "SourceRef": {
+              "Source": "c"
+             }
+            },
+            "Property": "last_exp_hr_inicio"
+           },
+           "Name": "cargas_hist.last_exp_hr_inicio",
+           "NativeReferenceName": "Hr inicio exp anterior"
+          },
+          {
+           "Column": {
+            "Expression": {
+             "SourceRef": {
+              "Source": "c"
+             }
+            },
+            "Property": "last_exp_hr_fin"
+           },
+           "Name": "cargas_hist.last_exp_hr_fin",
+           "NativeReferenceName": "Hr fin exp anterior"
+          },
+          {
+           "Column": {
+            "Expression": {
+             "SourceRef": {
+              "Source": "c"
+             }
+            },
+            "Property": "servicio_exp_post"
+           },
+           "Name": "cargas_hist.Servicio Posterior",
+           "NativeReferenceName": "Servicio exp posterior"
+          },
+          {
+           "Column": {
+            "Expression": {
+             "SourceRef": {
+              "Source": "c"
+             }
+            },
+            "Property": "first_exp_hr_inicio"
+           },
+           "Name": "cargas_hist.first_exp_hr_inicio",
+           "NativeReferenceName": "Hr inicio exp posterior"
+          },
+          {
+           "Column": {
+            "Expression": {
+             "SourceRef": {
+              "Source": "c"
+             }
+            },
+            "Property": "first_exp_hr_fin"
+           },
+           "Name": "cargas_hist.first_exp_hr_fin",
+           "NativeReferenceName": "Hr fin exp posterior"
+          },
+          {
+           "Aggregation": {
+            "Expression": {
+             "Column": {
+              "Expression": {
+               "SourceRef": {
+                "Source": "c"
+               }
+              },
+              "Property": "soc_inicio"
+             }
+            },
+            "Function": 0
+           },
+           "Name": "Sum(cargas.soc_inicio)"
+          },
+          {
+           "Aggregation": {
+            "Expression": {
+             "Column": {
+              "Expression": {
+               "SourceRef": {
+                "Source": "c"
+               }
+              },
+              "Property": "soc_fin"
+             }
+            },
+            "Function": 0
+           },
+           "Name": "Sum(cargas.soc_fin)"
+          },
+          {
+           "Aggregation": {
+            "Expression": {
+             "Column": {
+              "Expression": {
+               "SourceRef": {
+                "Source": "c"
+               }
+              },
+              "Property": "soh"
+             }
+            },
+            "Function": 0
+           },
+           "Name": "Sum(cargas.soh)"
+          },
+          {
+           "Aggregation": {
+            "Expression": {
+             "Column": {
+              "Expression": {
+               "SourceRef": {
+                "Source": "c"
+               }
+              },
+              "Property": "tiempo_carga"
+             }
+            },
+            "Function": 0
+           },
+           "Name": "Sum(cargas.tiempo_carga)"
+          },
+          {
+           "Aggregation": {
+            "Expression": {
+             "Column": {
+              "Expression": {
+               "SourceRef": {
+                "Source": "c"
+               }
+              },
+              "Property": "soc_carga"
+             }
+            },
+            "Function": 0
+           },
+           "Name": "Sum(cargas.soc_carga)"
+          },
+          {
+           "Aggregation": {
+            "Expression": {
+             "Column": {
+              "Expression": {
+               "SourceRef": {
+                "Source": "c"
+               }
+              },
+              "Property": "estado_carga"
+             }
+            },
+            "Function": 3
+           },
+           "Name": "Min(cargas.estado_carga)"
+          },
+          {
+           "Aggregation": {
+            "Expression": {
+             "Column": {
+              "Expression": {
+               "SourceRef": {
+                "Source": "c"
+               }
+              },
+              "Property": "kwh_carga"
+             }
+            },
+            "Function": 0
+           },
+           "Name": "Sum(cargas.kwh_carga)"
+          },
+          {
+           "Aggregation": {
+            "Expression": {
+             "Column": {
+              "Expression": {
+               "SourceRef": {
+                "Source": "c"
+               }
+              },
+              "Property": "dt_reg_cargador_baja_p"
+             }
+            },
+            "Function": 0
+           },
+           "Name": "Sum(cargas.dt_reg_cargador_baja_p)"
+          },
+          {
+           "Aggregation": {
+            "Expression": {
+             "Column": {
+              "Expression": {
+               "SourceRef": {
+                "Source": "c"
+               }
+              },
+              "Property": "dt_reg_cargador_sube_p"
+             }
+            },
+            "Function": 0
+           },
+           "Name": "Sum(cargas.dt_reg_cargador_sube_p)"
+          },
+          {
+           "Aggregation": {
+            "Expression": {
+             "Column": {
+              "Expression": {
+               "SourceRef": {
+                "Source": "c"
+               }
+              },
+              "Property": "dt_reg_bus"
+             }
+            },
+            "Function": 0
+           },
+           "Name": "Sum(cargas.dt_reg_bus)"
+          },
+          {
+           "Aggregation": {
+            "Expression": {
+             "Column": {
+              "Expression": {
+               "SourceRef": {
+                "Source": "c"
+               }
+              },
+              "Property": "kwh_carga_teracal"
+             }
+            },
+            "Function": 0
+           },
+           "Name": "Sum(cargas.kwh_carga_teracal)1"
+          }
+         ],
+         "Where": [
+          {
+           "Condition": {
+            "In": {
+             "Expressions": [
+              {
+               "Column": {
+                "Expression": {
+                 "SourceRef": {
+                  "Source": "c1"
+                 }
+                },
+                "Property": "dia_actual"
+               }
+              }
+             ],
+             "Values": [
+              [
+               {
+                "Literal": {
+                 "Value": "'Día actual'"
+                }
+               }
+              ]
+             ]
+            }
+           }
+          }
+         ],
+         "OrderBy": [
+          {
+           "Direction": 1,
+           "Expression": {
+            "Column": {
+             "Expression": {
+              "SourceRef": {
+               "Source": "c"
+              }
+             },
+             "Property": "terminal"
+            }
+           }
+          },
+          {
+           "Direction": 1,
+           "Expression": {
+            "Column": {
+             "Expression": {
+              "SourceRef": {
+               "Source": "c"
+              }
+             },
+             "Property": "pistola"
+            }
+           }
+          },
+          {
+           "Direction": 1,
+           "Expression": {
+            "Column": {
+             "Expression": {
+              "SourceRef": {
+               "Source": "c"
+              }
+             },
+             "Property": "hr_inicio_carga"
+            }
+           }
+          }
+         ]
+        },
+        "Binding": {
+         "Primary": {
+          "Groupings": [
+           {
+            "Projections": [
+             0,
+             1,
+             2,
+             3,
+             4,
+             5,
+             6,
+             7,
+             8,
+             9,
+             10,
+             11,
+             12,
+             13,
+             14,
+             15,
+             16,
+             17,
+             18,
+             19,
+             20,
+             21,
+             22,
+             23,
+             24,
+             25,
+             26,
+             27,
+             28,
+             29,
+             30,
+             31,
+             32,
+             33,
+             34,
+             35,
+             36
+            ]
+           }
+          ]
+         },
+         "DataReduction": {
+          "DataVolume": 3,
+          "Primary": {
+           "Window": {
+            "Count": 500
+           }
+          }
+         },
+         "Aggregates": [
+          {
+           "Select": 29,
+           "Aggregations": [
+            {
+             "Min": {}
+            },
+            {
+             "Max": {}
+            }
+           ]
+          },
+          {
+           "Select": 30,
+           "Aggregations": [
+            {
+             "Min": {}
+            },
+            {
+             "Max": {}
+            }
+           ]
+          },
+          {
+           "Select": 32,
+           "Aggregations": [
+            {
+             "Min": {}
+            },
+            {
+             "Max": {}
+            }
+           ]
+          },
+          {
+           "Select": 33,
+           "Aggregations": [
+            {
+             "Min": {}
+            },
+            {
+             "Max": {}
+            }
+           ]
+          },
+          {
+           "Select": 34,
+           "Aggregations": [
+            {
+             "Min": {}
+            },
+            {
+             "Max": {}
+            }
+           ]
+          },
+          {
+           "Select": 35,
+           "Aggregations": [
+            {
+             "Min": {}
+            },
+            {
+             "Max": {}
+            }
+           ]
+          },
+          {
+           "Select": 36,
+           "Aggregations": [
+            {
+             "Min": {}
+            },
+            {
+             "Max": {}
+            }
+           ]
+          }
+         ],
+         "SuppressedJoinPredicates": [
+          26,
+          27,
+          28,
+          29,
+          30,
+          31,
+          32,
+          33,
+          34,
+          35,
+          36
+         ],
+         "Version": 1
+        },
+        "ExecutionMetricsKind": 1
+       }
+      }
+     ]
+    },
+    "QueryId": "",
+    "ApplicationContext": {
+     "DatasetId": "c4ccf010-d40a-42fb-96e6-e456b304c6a4",
+     "Sources": [
+      {
+       "ReportId": "830b1f41-0427-4ff7-a34a-d3726cad3674",
+       "VisualId": "5e6692262d00eb275a92"
+      }
+     ]
+    }
+   }
+  ],
+  "cancelQueries": [],
+  "modelId": 81065
+ },
+ "actualizacion": {
+  "version": "1.0.0",
+  "queries": [
+   {
+    "Query": {
+     "Commands": [
+      {
+       "SemanticQueryDataShapeCommand": {
+        "Query": {
+         "Version": 2,
+         "From": [
+          {
+           "Name": "m",
+           "Entity": "Medidas",
+           "Type": 0
+          },
+          {
+           "Name": "c",
+           "Entity": "cargas_detalle",
+           "Type": 0
+          }
+         ],
+         "Select": [
+          {
+           "Measure": {
+            "Expression": {
+             "SourceRef": {
+              "Source": "m"
+             }
+            },
+            "Property": "Update Datos"
+           },
+           "Name": "Medidas.Update Datos",
+           "NativeReferenceName": "Update Datos"
+          }
+         ],
+         "Where": [
+          {
+           "Condition": {
+            "In": {
+             "Expressions": [
+              {
+               "Column": {
+                "Expression": {
+                 "SourceRef": {
+                  "Source": "c"
+                 }
+                },
+                "Property": "dia_actual"
+               }
+              }
+             ],
+             "Values": [
+              [
+               {
+                "Literal": {
+                 "Value": "'Día actual'"
+                }
+               }
+              ]
+             ]
+            }
+           }
+          }
+         ]
+        },
+        "Binding": {
+         "Primary": {
+          "Groupings": [
+           {
+            "Projections": [
+             0
+            ]
+           }
+          ]
+         },
+         "DataReduction": {
+          "DataVolume": 3,
+          "Primary": {
+           "Top": {}
+          }
+         },
+         "Version": 1
+        },
+        "ExecutionMetricsKind": 1
+       }
+      }
+     ]
+    },
+    "QueryId": "",
+    "ApplicationContext": {
+     "DatasetId": "c4ccf010-d40a-42fb-96e6-e456b304c6a4",
+     "Sources": [
+      {
+       "ReportId": "830b1f41-0427-4ff7-a34a-d3726cad3674",
+       "VisualId": "d019c5c1acef53a50079"
+      }
+     ]
+    }
+   }
+  ],
+  "cancelQueries": [],
+  "modelId": 81065
+ }
+}

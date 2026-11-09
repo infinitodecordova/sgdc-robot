@@ -1,0 +1,4 @@
+# Nunca subir la llave de Firebase a GitHub
+serviceAccount*.json
+*.json.key
+node_modules/
