@@ -1,4 +1,5 @@
-# Trae el SoC de digiCAR a Firestore cada 5 minutos (GitHub a veces atrasa unos minutos).
+# Trae el SoC de digiCAR a Firestore cada 5 minutos, solo en horario de turno
+# (Diurno 08:30–18:00 y Nocturno 22:00–07:30, con 15 min de margen a cada lado).
 # Secretos: FIREBASE_SERVICE_ACCOUNT, DIGICAR_USUARIO y DIGICAR_CLAVE.
 name: Sincronizar digiCAR
 
@@ -16,14 +17,28 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 4
     steps:
+      - name: ¿Hay turno ahora? (hora de Chile)
+        id: horario
+        run: |
+          hm=$((10#$(TZ=America/Santiago date +%H%M)))
+          if { [ $hm -ge 815 ] && [ $hm -lt 1815 ]; } || [ $hm -ge 2145 ] || [ $hm -lt 745 ]; then
+            echo "si=1" >> "$GITHUB_OUTPUT"
+            echo "En turno ($hm): se consulta digiCAR."
+          else
+            echo "Fuera de turno ($hm): no se consulta digiCAR."
+          fi
       - uses: actions/checkout@v5
+        if: steps.horario.outputs.si == '1' || github.event_name == 'workflow_dispatch'
       - uses: actions/setup-node@v5
+        if: steps.horario.outputs.si == '1' || github.event_name == 'workflow_dispatch'
         with:
           node-version: 22
       - name: Instalar
+        if: steps.horario.outputs.si == '1' || github.event_name == 'workflow_dispatch'
         working-directory: tools
         run: npm install --no-audit --no-fund
       - name: Traer SoC de digiCAR
+        if: steps.horario.outputs.si == '1' || github.event_name == 'workflow_dispatch'
         working-directory: tools
         env:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
