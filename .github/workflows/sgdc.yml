@@ -20,8 +20,8 @@ jobs:
       - name: Instalar
         working-directory: tools
         run: npm install --no-audit --no-fund
-      - name: Traer SGDC
+      - name: Traer SGDC y buses en taller
         working-directory: tools
         env:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
-        run: node sgdc_sync.mjs --solo-sgdc
+        run: node sgdc_sync.mjs --sin-digicar

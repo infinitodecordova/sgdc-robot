@@ -1,0 +1,357 @@
+{
+ "_info": "Consultas copiadas del reporte público de Power BI \"Estado buses taller\" (STP operaciones). No contienen claves.",
+ "url": "https://wabi-south-central-us-c-primary-api.analysis.windows.net/public/reports/querydata?synchronous=true",
+ "resourceKey": "d68c9a17-d8e8-426b-8394-2cb35247e10e",
+ "buses": {
+  "version": "1.0.0",
+  "queries": [
+   {
+    "Query": {
+     "Commands": [
+      {
+       "SemanticQueryDataShapeCommand": {
+        "Query": {
+         "Version": 2,
+         "From": [
+          {
+           "Name": "s",
+           "Entity": "stp_portal buses_inventario",
+           "Type": 0
+          },
+          {
+           "Name": "b",
+           "Entity": "Base_taller",
+           "Type": 0
+          },
+          {
+           "Name": "i",
+           "Entity": "idpanneRutaEstado",
+           "Type": 0
+          }
+         ],
+         "Select": [
+          {
+           "Column": {
+            "Expression": {
+             "SourceRef": {
+              "Source": "s"
+             }
+            },
+            "Property": "PPU1"
+           },
+           "Name": "stp_portal buses_inventario.PPU1"
+          },
+          {
+           "Column": {
+            "Expression": {
+             "SourceRef": {
+              "Source": "b"
+             }
+            },
+            "Property": "Unichar"
+           },
+           "Name": "Base_taller.Unichar"
+          },
+          {
+           "Column": {
+            "Expression": {
+             "SourceRef": {
+              "Source": "i"
+             }
+            },
+            "Property": "Detalle"
+           },
+           "Name": "idpanneRutaEstado.Detalle"
+          },
+          {
+           "Column": {
+            "Expression": {
+             "SourceRef": {
+              "Source": "b"
+             }
+            },
+            "Property": "Tiempo_transcurrido"
+           },
+           "Name": "Base_taller.Tiempo_transcurrido"
+          },
+          {
+           "Column": {
+            "Expression": {
+             "SourceRef": {
+              "Source": "b"
+             }
+            },
+            "Property": "Fecha_I"
+           },
+           "Name": "Base_taller.Fecha_I"
+          },
+          {
+           "Aggregation": {
+            "Expression": {
+             "Column": {
+              "Expression": {
+               "SourceRef": {
+                "Source": "b"
+               }
+              },
+              "Property": "Dif_min"
+             }
+            },
+            "Function": 0
+           },
+           "Name": "Sum(Base_taller.Dif_min)"
+          },
+          {
+           "Column": {
+            "Expression": {
+             "SourceRef": {
+              "Source": "b"
+             }
+            },
+            "Property": "Estado"
+           },
+           "Name": "Base_taller.Estado"
+          },
+          {
+           "Column": {
+            "Expression": {
+             "SourceRef": {
+              "Source": "s"
+             }
+            },
+            "Property": "Terminal v2"
+           },
+           "Name": "stp_portal buses_inventario.Terminal v2"
+          },
+          {
+           "Aggregation": {
+            "Expression": {
+             "Column": {
+              "Expression": {
+               "SourceRef": {
+                "Source": "b"
+               }
+              },
+              "Property": "Color_fondo"
+             }
+            },
+            "Function": 3
+           },
+           "Name": "Min(Base_taller.Color_fondo)"
+          }
+         ],
+         "Where": [
+          {
+           "Condition": {
+            "In": {
+             "Expressions": [
+              {
+               "Column": {
+                "Expression": {
+                 "SourceRef": {
+                  "Source": "s"
+                 }
+                },
+                "Property": "Estado"
+               }
+              }
+             ],
+             "Values": [
+              [
+               {
+                "Literal": {
+                 "Value": "'ACTIVO'"
+                }
+               }
+              ]
+             ]
+            }
+           }
+          }
+         ],
+         "OrderBy": [
+          {
+           "Direction": 1,
+           "Expression": {
+            "Column": {
+             "Expression": {
+              "SourceRef": {
+               "Source": "b"
+              }
+             },
+             "Property": "Fecha_I"
+            }
+           }
+          }
+         ]
+        },
+        "Binding": {
+         "Primary": {
+          "Groupings": [
+           {
+            "Projections": [
+             7,
+             0,
+             1,
+             6,
+             2,
+             4,
+             3,
+             5,
+             8
+            ],
+            "ShowItemsWithNoData": [
+             7,
+             0,
+             1,
+             6,
+             2,
+             4,
+             3,
+             5
+            ]
+           }
+          ]
+         },
+         "DataReduction": {
+          "DataVolume": 3,
+          "Primary": {
+           "Window": {
+            "Count": 500
+           }
+          }
+         },
+         "SuppressedJoinPredicates": [
+          8
+         ],
+         "Version": 1
+        },
+        "ExecutionMetricsKind": 1
+       }
+      }
+     ]
+    },
+    "QueryId": "",
+    "ApplicationContext": {
+     "DatasetId": "002da6ba-034f-4ccb-bb47-5aab9a5d8844",
+     "Sources": [
+      {
+       "ReportId": "6fa3d4f7-a388-4656-95c6-11e6323ef43a",
+       "VisualId": "b2d3e457e45667f0483f"
+      }
+     ]
+    }
+   }
+  ],
+  "cancelQueries": [],
+  "modelId": 81432
+ },
+ "actualizacion": {
+  "version": "1.0.0",
+  "queries": [
+   {
+    "Query": {
+     "Commands": [
+      {
+       "SemanticQueryDataShapeCommand": {
+        "Query": {
+         "Version": 2,
+         "From": [
+          {
+           "Name": "l",
+           "Entity": "LastDate_bustaller",
+           "Type": 0
+          },
+          {
+           "Name": "s",
+           "Entity": "stp_portal buses_inventario",
+           "Type": 0
+          }
+         ],
+         "Select": [
+          {
+           "Aggregation": {
+            "Expression": {
+             "Column": {
+              "Expression": {
+               "SourceRef": {
+                "Source": "l"
+               }
+              },
+              "Property": "gg"
+             }
+            },
+            "Function": 3
+           },
+           "Name": "Min(LastDate_bustaller.gg)"
+          }
+         ],
+         "Where": [
+          {
+           "Condition": {
+            "In": {
+             "Expressions": [
+              {
+               "Column": {
+                "Expression": {
+                 "SourceRef": {
+                  "Source": "s"
+                 }
+                },
+                "Property": "Estado"
+               }
+              }
+             ],
+             "Values": [
+              [
+               {
+                "Literal": {
+                 "Value": "'ACTIVO'"
+                }
+               }
+              ]
+             ]
+            }
+           }
+          }
+         ]
+        },
+        "Binding": {
+         "Primary": {
+          "Groupings": [
+           {
+            "Projections": [
+             0
+            ]
+           }
+          ]
+         },
+         "DataReduction": {
+          "DataVolume": 3,
+          "Primary": {
+           "Top": {}
+          }
+         },
+         "Version": 1
+        },
+        "ExecutionMetricsKind": 1
+       }
+      }
+     ]
+    },
+    "QueryId": "",
+    "ApplicationContext": {
+     "DatasetId": "002da6ba-034f-4ccb-bb47-5aab9a5d8844",
+     "Sources": [
+      {
+       "ReportId": "6fa3d4f7-a388-4656-95c6-11e6323ef43a",
+       "VisualId": "d12e6efeead48530fd18"
+      }
+     ]
+    }
+   }
+  ],
+  "cancelQueries": [],
+  "modelId": 81432
+ }
+}

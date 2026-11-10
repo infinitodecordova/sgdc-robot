@@ -79,13 +79,13 @@ const num = (v) => {
 };
 
 // ------------------------------------------------------------ Consultar Power BI
-async function consultar(cuerpo) {
-  const r = await fetch(C.url, {
+async function consultar(cuerpo, origen = C) {
+  const r = await fetch(origen.url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json;charset=UTF-8',
       Accept: 'application/json',
-      'X-PowerBI-ResourceKey': C.resourceKey,
+      'X-PowerBI-ResourceKey': origen.resourceKey,
       Origin: 'https://app.powerbi.com',
       Referer: 'https://app.powerbi.com/',
       ActivityId: crypto.randomUUID(),
@@ -226,12 +226,87 @@ async function sincronizarSgdc(probar) {
   console.log(`SGDC: ${n} cargas nuevas o cambiadas guardadas (de ${cargas.length}).`);
 }
 
+/// PPU del semáforo. Se guarda en un solo documento y se rehace una vez al día
+/// (así cada pasada lee 1 documento y no los 48 buses).
+async function obtenerFlota() {
+  if (!db) return null;
+  const ref = db.doc('privado/flota');
+  const g = await ref.get();
+  const edad = Date.now() - (g.data()?.fecha?.toMillis?.() ?? 0);
+  if (g.exists && Array.isArray(g.data().ppus) && edad < 24 * 3600 * 1000) return new Set(g.data().ppus);
+  const s = await db.collection('semaforoch').get();
+  const flota = new Set(s.docs.map((d) => ppuClave(d.data().ppu ?? d.id)));
+  const { Timestamp } = await import('firebase-admin/firestore');
+  await ref.set({ ppus: [...flota], fecha: Timestamp.now() });
+  return flota;
+}
+
+// ------------------------------------------------------------ Buses en taller
+// Reporte público "Estado buses taller" (STP operaciones). Solo se guardan los buses
+// del semáforo que están No Operativos, todos en UN documento (taller/flota).
+async function sincronizarTaller(probar) {
+  const T = JSON.parse(readFileSync(join(aqui, 'taller_consultas.json'), 'utf8'));
+  const cuerpo = structuredClone(T.buses);
+  const q = cuerpo.queries[0].Query.Commands[0].SemanticQueryDataShapeCommand.Query;
+  q.Where = [
+    ...(q.Where ?? []),
+    {
+      Condition: {
+        In: {
+          Expressions: [{ Column: { Expression: { SourceRef: { Source: 's' } }, Property: 'Terminal v2' } }],
+          Values: [[{ Literal: { Value: "'Camilo henriquez'" } }]],
+        },
+      },
+    },
+  ];
+  const { filas, quedanMas } = decodificar(await consultar(cuerpo, T));
+  if (quedanMas) console.warn('Ojo: el reporte de taller dice que hay más filas que las 500 que entrega.');
+
+  let datos = null;
+  try {
+    const u = decodificar(await consultar(T.actualizacion, T));
+    datos = horaReal(Object.values(u.filas[0] ?? {})[0]);
+  } catch (e) {
+    console.warn('No pude leer la hora de actualización del taller:', e.message);
+  }
+
+  const flota = await obtenerFlota();
+  const buses = {};
+  for (const f of filas) {
+    const ppu = ppuClave(f['stp_portal buses_inventario.PPU1']);
+    const estado = f['Base_taller.Estado'];
+    if (!ppu || !estado || estado === 'Operativo') continue;
+    if (flota && !flota.has(ppu)) continue; // solo las patentes del semáforo
+    buses[ppu] = {
+      estado,
+      detalle: f['idpanneRutaEstado.Detalle'] ?? null,
+      ingreso: horaReal(f['Base_taller.Fecha_I']),
+    };
+  }
+  const n = Object.keys(buses).length;
+  console.log(`Taller: ${filas.length} buses del terminal en el reporte, ${n} del semáforo en taller ` +
+    `(datos: ${datos?.toLocaleString('es-CL', { timeZone: 'America/Santiago' }) ?? '?'})`);
+  if (probar) {
+    for (const [ppu, b] of Object.entries(buses)) {
+      console.log(' ', ppu, b.estado, '·', b.detalle, '· ingresó',
+        b.ingreso?.toLocaleString('es-CL', { timeZone: 'America/Santiago' }));
+    }
+    return;
+  }
+  const { FieldValue } = await import('firebase-admin/firestore');
+  await db.doc('taller/flota').set({ buses, datos, actualizado: FieldValue.serverTimestamp() });
+  console.log(`Taller: ${n} buses guardados en Firestore.`);
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const probar = args.includes('--probar');
   const llave = args.find((a) => !a.startsWith('--'));
-  const hacerSgdc = !args.includes('--solo-digicar');
-  const hacerDigicar = !args.includes('--solo-sgdc');
+  const solo = (x) => args.includes(`--solo-${x}`);
+  const alguno = solo('sgdc') || solo('digicar') || solo('taller');
+  const hacerSgdc = alguno ? solo('sgdc') : true;
+  const hacerTaller = alguno ? solo('taller') : true;
+  const hacerDigicar = alguno ? solo('digicar') : !args.includes('--sin-digicar');
   if (!probar) await conectarFirestore(llave);
 
   let fallo = false;
@@ -244,24 +319,18 @@ async function main() {
       await anotarError(e, 'robot SGDC').catch(() => {});
     }
   }
+  if (hacerTaller) {
+    try {
+      await sincronizarTaller(probar);
+    } catch (e) {
+      fallo = true;
+      console.error('Falló el taller:', e.message);
+      await anotarError(e, 'robot taller').catch(() => {});
+    }
+  }
   if (hacerDigicar) {
     try {
-      let flota = null;
-      if (db) {
-        // La lista de PPU se guarda en un solo documento y se rehace una vez al día
-        // (así cada pasada de 5 min lee 1 documento y no los 48 buses).
-        const ref = db.doc('privado/flota');
-        const g = await ref.get();
-        const edad = Date.now() - (g.data()?.fecha?.toMillis?.() ?? 0);
-        if (g.exists && Array.isArray(g.data().ppus) && edad < 24 * 3600 * 1000) {
-          flota = new Set(g.data().ppus);
-        } else {
-          const s = await db.collection('semaforoch').get();
-          flota = new Set(s.docs.map((d) => ppuClave(d.data().ppu ?? d.id)));
-          const { Timestamp } = await import('firebase-admin/firestore');
-          await ref.set({ ppus: [...flota], fecha: Timestamp.now() });
-        }
-      }
+      const flota = await obtenerFlota();
       const { sincronizarDigicar, pedirCredencialesSiFaltan } = await import('./digicar_sync.mjs');
       if (probar) await pedirCredencialesSiFaltan();
       await sincronizarDigicar({ db: probar ? null : db, dbToken: db, probar, flota });
