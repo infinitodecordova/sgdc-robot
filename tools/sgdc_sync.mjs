@@ -119,9 +119,13 @@ export function aCarga(f) {
   const ppuSgdc = String(f['cargas_hist.ppu'] ?? '').trim().toUpperCase();
   const inicio = horaReal(f['cargas_hist.hr_inicio_carga']);
   const reserva = horaReal(f['cargas_hist.hr_reserva']);
+  const ppu = ppuSgdc.replace(/[^A-Z0-9]/g, ''); // igual que en el semáforo: SRPJ80
   return {
-    id: String(f['cargas_hist.secuencia_id']),
-    ppu: ppuSgdc.replace(/[^A-Z0-9]/g, ''), // igual que en el semáforo: SRPJ80
+    // Una carga = un bus + su hora de inicio. (El número de secuencia del SGDC cambia
+    // de una hora a otra, y con él la misma carga quedaba guardada varias veces.)
+    id: `${ppu}_${(inicio ?? reserva)?.getTime() ?? String(f['cargas_hist.secuencia_id'])}`,
+    secuencia: String(f['cargas_hist.secuencia_id'] ?? ''),
+    ppu,
     ppuSgdc,
     terminal: f['cargas_hist.terminal'] ?? null,
     pistola: f['cargas_hist.pistola'] ?? null,
@@ -198,7 +202,7 @@ async function sincronizarSgdc(probar) {
     return;
   }
 
-  const { FieldValue } = await import('firebase-admin/firestore');
+  const { FieldValue, FieldPath } = await import('firebase-admin/firestore');
   const ahora = FieldValue.serverTimestamp();
 
   // Solo se escriben las cargas nuevas o que cambiaron (ahorra escrituras del plan gratis).
@@ -238,6 +242,19 @@ async function sincronizarSgdc(probar) {
   }, { merge: true });
   await batch.commit();
   console.log(`SGDC: ${n} cargas nuevas o cambiadas guardadas (de ${cargas.length}).`);
+
+  // Limpieza: borra las cargas guardadas con el identificador antiguo (quedaban repetidas).
+  let borradas = 0;
+  for (let i = 0; i < 10; i++) {
+    const viejas = (await db.collection('sgdc').orderBy(FieldPath.documentId()).startAt('2').endAt('2\uf8ff').limit(400).get())
+      .docs.filter((d) => /^\d{4}-\d{2}-\d{2}_/.test(d.id));
+    if (!viejas.length) break;
+    const b = db.batch();
+    for (const d of viejas) b.delete(d.ref);
+    await b.commit();
+    borradas += viejas.length;
+  }
+  if (borradas) console.log(`SGDC: ${borradas} cargas repetidas (formato antiguo) borradas.`);
 }
 
 /// PPU del semáforo. Se guarda en un solo documento y se rehace una vez al día
