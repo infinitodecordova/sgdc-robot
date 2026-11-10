@@ -217,6 +217,20 @@ async function sincronizarSgdc(probar) {
     batch.set(refs[i], { ...resto, actualizado: ahora }, { merge: true });
     n++;
   });
+  // Resumen liviano en UN documento que ven todos: sirve para avisar en el semáforo
+  // que un bus ya presenta carga en el SGDC antes de cargarlo de nuevo.
+  const resumen = {};
+  for (const c of cargas) {
+    (resumen[c.ppu] ??= []).push({
+      inicio: c.inicio ?? c.reserva ?? null,
+      fin: c.fin ?? null,
+      pistola: c.pistola ?? null,
+      socInicio: c.socInicio ?? null,
+      socFin: c.socFin ?? null,
+      estado: c.estado ?? null,
+    });
+  }
+  batch.set(db.doc('sgdcResumen/hoy'), { cargas: resumen, datosReporte: actualizado, actualizado: ahora });
   batch.set(db.doc('config/sgdc'), {
     ultimaSync: ahora,
     datosReporte: actualizado,
