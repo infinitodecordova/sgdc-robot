@@ -27,6 +27,41 @@ const num = (v) => {
   return Number.isFinite(n) ? Math.round(n * 10) / 10 : null;
 };
 
+const coord = (v) => {
+  const n = parseFloat(String(v ?? ''));
+  return Number.isFinite(n) && n !== 0 ? n : null;
+};
+
+/// Distancia en metros entre dos puntos.
+function metros(a, b) {
+  const R = 6371000;
+  const rad = (x) => (x * Math.PI) / 180;
+  const dLat = rad(b.lat - a.lat);
+  const dLng = rad(b.lng - a.lng);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
+const RADIO_TERMINAL = 350; // metros desde el centro del terminal
+const MIN_BUSES_TERMINAL = 10; // buses juntos para reconocer dónde está el terminal
+
+/// El terminal es donde hay más buses de la flota juntos. Devuelve su centro, o null
+/// si ahora no hay suficientes buses juntos (se sigue usando el centro guardado).
+function buscarTerminal(buses) {
+  const pts = buses.filter((b) => b.lat != null && b.lng != null);
+  let mejor = null;
+  for (const p of pts) {
+    const cerca = pts.filter((q) => metros(p, q) <= 250);
+    if (!mejor || cerca.length > mejor.length) mejor = cerca;
+  }
+  if (!mejor || mejor.length < MIN_BUSES_TERMINAL) return null;
+  return {
+    lat: mejor.reduce((s, b) => s + b.lat, 0) / mejor.length,
+    lng: mejor.reduce((s, b) => s + b.lng, 0) / mejor.length,
+    n: mejor.length,
+  };
+}
+
 /// Fecha de vencimiento del token (va dentro del mismo token, no hay que preguntarla).
 function venceToken(token) {
   try {
@@ -135,6 +170,8 @@ async function consultarDigicar(token) {
         latestValues: [
           { type: 'TIME_SERIES', key: 'DigicarSoc' },
           { type: 'TIME_SERIES', key: 'DigicarOdometer' },
+          { type: 'TIME_SERIES', key: 'PositionLatitude' },
+          { type: 'TIME_SERIES', key: 'PositionLongitude' },
         ],
       }),
     });
@@ -152,6 +189,9 @@ async function consultarDigicar(token) {
         soc: num(t.DigicarSoc?.value),
         socTs: t.DigicarSoc?.ts ? new Date(Number(t.DigicarSoc.ts)) : null,
         odometro: num(t.DigicarOdometer?.value),
+        lat: coord(t.PositionLatitude?.value),
+        lng: coord(t.PositionLongitude?.value),
+        posTs: t.PositionLatitude?.ts ? new Date(Number(t.PositionLatitude.ts)) : null,
       });
     }
     if (!j.hasNext) break;
@@ -229,23 +269,48 @@ export async function sincronizarDigicar({ db, dbToken = null, probar = false, f
     }
     console.log(`digiCAR: ${mios.length} de ${flota.size} buses de Camilo Henríquez encontrados.`);
   }
+  if (probar) {
+    const t = buscarTerminal(flota ? mios : mios.filter((f) => /^SR/.test(ppuClave(f.nombre))));
+    console.log(t
+      ? `Terminal reconocido: ${t.n} buses juntos en ${t.lat.toFixed(5)}, ${t.lng.toFixed(5)} ` +
+        `→ https://www.google.com/maps?q=${t.lat},${t.lng}`
+      : 'Terminal: ahora no hay suficientes buses juntos para reconocerlo.');
+  }
   if (probar || !db) return { vence, filas: mios };
 
   const { FieldValue, Timestamp } = await import('firebase-admin/firestore');
   const batch = db.batch();
   // Todos los buses van en UN solo documento (digicar/flota): 1 escritura por pasada,
   // aunque corra cada 5 minutos (288 escrituras al día en vez de ~14.000).
+  // Centro del terminal: se recalcula cuando hay hartos buses juntos; si no, se usa el guardado.
+  const refFlota = db.collection('digicar').doc('flota');
+  let terminal = buscarTerminal(mios);
+  if (!terminal) terminal = (await refFlota.get()).data()?.terminal ?? null;
   const buses = {};
   for (const f of mios) {
     if (f.soc == null) continue;
+    const tienePos = f.lat != null && f.lng != null;
+    const dist = terminal && tienePos ? Math.round(metros(terminal, f)) : null;
     buses[f.ppu] = {
       soc: f.soc,
       fecha: f.socTs ? Timestamp.fromDate(f.socTs) : null,
       odometro: f.odometro,
+      lat: f.lat,
+      lng: f.lng,
+      posFecha: f.posTs ? Timestamp.fromDate(f.posTs) : null,
+      dist, // metros al terminal
+      enTerminal: dist == null ? null : dist <= RADIO_TERMINAL,
     };
   }
   const n = Object.keys(buses).length;
-  batch.set(db.collection('digicar').doc('flota'), { buses, actualizado: FieldValue.serverTimestamp() });
+  batch.set(refFlota, { buses, terminal, actualizado: FieldValue.serverTimestamp() });
+  if (terminal) {
+    const dentro = Object.values(buses).filter((b) => b.enTerminal).length;
+    console.log(`digiCAR: ${dentro} buses en el terminal y ${n - dentro} fuera ` +
+      `(centro ${terminal.lat.toFixed(5)}, ${terminal.lng.toFixed(5)}).`);
+  } else {
+    console.log('digiCAR: todavía no se reconoce dónde está el terminal (faltan buses juntos).');
+  }
   batch.set(db.doc('config/digicar'), {
     ultimaSync: FieldValue.serverTimestamp(),
     buses: mios.length,
