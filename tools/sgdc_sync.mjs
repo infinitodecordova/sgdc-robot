@@ -220,6 +220,16 @@ async function sincronizarSgdc(probar) {
     if (antes && igual(antes, resto)) return;
     batch.set(refs[i], { ...resto, actualizado: ahora }, { merge: true });
     n++;
+    // El SoH de cada carga terminada queda como lectura en el historial de SoH del bus.
+    if (c.estado === 'Finalizada' && c.soh != null && c.soh > 0 && c.soh <= 100) {
+      batch.set(db.collection('soh').doc(`sgdc_${refs[i].id}`), {
+        ppu: c.ppu,
+        valor: c.soh,
+        fecha: c.fin ?? c.inicio ?? new Date(),
+        nombre: 'SGDC',
+        origen: 'sgdc',
+      });
+    }
   });
   // Resumen liviano en UN documento que ven todos: sirve para avisar en el semáforo
   // que un bus ya presenta carga en el SGDC antes de cargarlo de nuevo.
@@ -232,6 +242,8 @@ async function sincronizarSgdc(probar) {
       socInicio: c.socInicio ?? null,
       socFin: c.socFin ?? null,
       estado: c.estado ?? null,
+      kwh: c.kwh ?? null,
+      soh: c.soh ?? null,
     });
   }
   batch.set(db.doc('sgdcResumen/hoy'), { cargas: resumen, datosReporte: actualizado, actualizado: ahora });
