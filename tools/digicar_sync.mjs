@@ -284,8 +284,9 @@ export async function sincronizarDigicar({ db, dbToken = null, probar = false, f
   // aunque corra cada 5 minutos (288 escrituras al día en vez de ~14.000).
   // Centro del terminal: se recalcula cuando hay hartos buses juntos; si no, se usa el guardado.
   const refFlota = db.collection('digicar').doc('flota');
+  const anterior = (await refFlota.get()).data() ?? {};
   let terminal = buscarTerminal(mios);
-  if (!terminal) terminal = (await refFlota.get()).data()?.terminal ?? null;
+  if (!terminal) terminal = anterior.terminal ?? null;
   const buses = {};
   for (const f of mios) {
     if (f.soc == null) continue;
@@ -299,6 +300,12 @@ export async function sincronizarDigicar({ db, dbToken = null, probar = false, f
       lng: f.lng,
       posFecha: f.posTs ? Timestamp.fromDate(f.posTs) : null,
       dist, // metros al terminal
+      // -1 se acerca al terminal, 1 se aleja, 0 igual o sin dato (comparado con la pasada anterior)
+      tendencia: (() => {
+        const antes = anterior.buses?.[f.ppu]?.dist;
+        if (dist == null || antes == null || Math.abs(dist - antes) < 50) return anterior.buses?.[f.ppu]?.tendencia ?? 0;
+        return dist < antes ? -1 : 1;
+      })(),
       enTerminal: dist == null ? null : dist <= RADIO_TERMINAL,
     };
   }
