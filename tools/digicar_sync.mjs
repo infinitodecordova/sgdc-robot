@@ -43,6 +43,30 @@ function metros(a, b) {
 }
 
 const RADIO_TERMINAL = 350; // metros desde el centro del terminal
+
+/// Lugares fijos donde puede estar un bus. tipo 'taller': todo bus ahí está en taller.
+/// Se pueden agregar más en Firestore (config/lugares → lista: [{nombre, lat, lng, radio, tipo}]).
+const LUGARES = [
+  { nombre: 'Taller Santa Cecilia', lat: -33.556244, lng: -70.576561, radio: 200, tipo: 'taller' },
+  { nombre: 'Terminal San Carlos', lat: -33.589034870223834, lng: -70.54126717332171, radio: 300, tipo: 'terminal' },
+  { nombre: 'Pie Andino', lat: -33.60321443100362, lng: -70.55378241397715, radio: 300, tipo: 'terminal' },
+];
+const RADIO_CERCA = 800; // metros: "Cerca de …"
+
+/// Lugar fijo donde está el bus ({...lugar, cerca: false}) o cerca del cual va ({..., cerca: true}).
+function lugarDe(p, lugares, enCercaniaCH) {
+  if (p.lat == null || p.lng == null) return null;
+  for (const l of lugares) {
+    const m = metros(l, p);
+    if (m <= (l.radio ?? 200)) return { ...l, cerca: false, dist: Math.round(m) };
+  }
+  if (enCercaniaCH) return null; // cerca de Camilo Henríquez manda lo del terminal
+  for (const l of lugares) {
+    const m = metros(l, p);
+    if (m <= RADIO_CERCA) return { ...l, cerca: true, dist: Math.round(m) };
+  }
+  return null;
+}
 const MIN_BUSES_TERMINAL = 10; // buses juntos para reconocer dónde está el terminal
 
 /// El terminal es donde hay más buses de la flota juntos. Devuelve su centro, o null
@@ -287,11 +311,17 @@ export async function sincronizarDigicar({ db, dbToken = null, probar = false, f
   const anterior = (await refFlota.get()).data() ?? {};
   let terminal = buscarTerminal(mios);
   if (!terminal) terminal = anterior.terminal ?? null;
+  let extras = [];
+  try {
+    extras = (await db.doc('config/lugares').get()).data()?.lista ?? [];
+  } catch {}
+  const lugares = [...LUGARES, ...extras.filter((l) => l?.lat != null && l?.lng != null && l?.nombre)];
   const buses = {};
   for (const f of mios) {
     if (f.soc == null) continue;
     const tienePos = f.lat != null && f.lng != null;
     const dist = terminal && tienePos ? Math.round(metros(terminal, f)) : null;
+    const lugar = lugarDe(f, lugares, dist != null && dist <= 800);
     buses[f.ppu] = {
       soc: f.soc,
       fecha: f.socTs ? Timestamp.fromDate(f.socTs) : null,
@@ -307,6 +337,17 @@ export async function sincronizarDigicar({ db, dbToken = null, probar = false, f
         return dist < antes ? -1 : 1;
       })(),
       enTerminal: dist == null ? null : dist <= RADIO_TERMINAL,
+      lugar: lugar?.nombre ?? null,
+      lugarTipo: lugar?.tipo ?? null,
+      lugarCerca: lugar?.cerca ?? false,
+      lugarDist: lugar?.dist ?? null,
+      // -1 se acerca al lugar, 1 se aleja (comparado con la pasada anterior en el mismo lugar)
+      lugarTendencia: (() => {
+        const antes = anterior.buses?.[f.ppu];
+        if (!lugar || antes?.lugar !== lugar.nombre || antes?.lugarDist == null) return 0;
+        if (Math.abs(lugar.dist - antes.lugarDist) < 50) return antes.lugarTendencia ?? 0;
+        return lugar.dist < antes.lugarDist ? -1 : 1;
+      })(),
     };
   }
   const n = Object.keys(buses).length;
