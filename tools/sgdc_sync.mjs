@@ -255,6 +255,15 @@ async function sincronizarSgdc(probar) {
   await batch.commit();
   console.log(`SGDC: ${n} cargas nuevas o cambiadas guardadas (de ${cargas.length}).`);
 
+  // Corrección automática del semáforo (si el admin la dejó activada).
+  try {
+    const { autoCorregir } = await import('./auto_correccion.mjs');
+    await autoCorregir(db, cargas);
+  } catch (e) {
+    console.error('Falló la corrección automática:', e.message);
+    await anotarError(e, 'robot SGDC').catch(() => {});
+  }
+
   // Limpieza: borra las cargas guardadas con el identificador antiguo (quedaban repetidas).
   let borradas = 0;
   for (let i = 0; i < 10; i++) {
