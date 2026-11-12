@@ -50,6 +50,7 @@ const LUGARES = [
   { nombre: 'Taller Santa Cecilia', lat: -33.556244, lng: -70.576561, radio: 200, tipo: 'taller' },
   { nombre: 'Terminal San Carlos', lat: -33.589034870223834, lng: -70.54126717332171, radio: 300, tipo: 'terminal' },
   { nombre: 'Pie Andino', lat: -33.60321443100362, lng: -70.55378241397715, radio: 300, tipo: 'terminal' },
+  { nombre: 'Cabezal Juanita', lat: -33.63569611936604, lng: -70.61039566169755, radio: 300, tipo: 'cabezal' },
 ];
 const RADIO_CERCA = 800; // metros: "Cerca de …"
 
