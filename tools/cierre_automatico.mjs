@@ -135,7 +135,7 @@ export async function cierreAutomatico(db, cargas, datosSgdc) {
     ` (${datosSgdc ? hora(datosSgdc) : 'sin datos'}), taller ${tallerOk ? 'al día' : 'ATRASADO'}.`);
 
   // Cargas del turno por PPU (para corregir: solo las de después del cierre anterior; para kWh: todas).
-  const corte = await ultimoCierre(db);
+  const corte = await ultimoCierre(db, id);
   const delTurno = new Map();
   const paraCorregir = new Map();
   // Las del Power BI de esta pasada + las que el robot ya guardó (por si el reporte solo trae las de hoy

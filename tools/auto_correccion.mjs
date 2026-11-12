@@ -57,10 +57,15 @@ async function adminEnTurno(db, ahora) {
   return null;
 }
 
-/// Hora del último "Cerrar turno" o "Limpiar semáforo" hecho en la app (o null si no hay).
-export async function ultimoCierre(db) {
+/// Desde cuándo NO se deben volver a escribir cargas de [turno] ('AAAAMMDD_AM' / '_PM'): la hora del
+/// último "Cerrar turno" de ESE MISMO turno, o del último "Limpiar semáforo", lo que sea más nuevo.
+/// El cierre de OTRO turno no corta nada (si el diurno se cierra a las 20:40, las cargas del
+/// nocturno de 20:00–20:40 siguen valiendo). Devuelve null si no hay corte.
+export async function ultimoCierre(db, turno) {
   const s = await db.collection('turnos').orderBy('cerradoEn', 'desc').limit(1).get();
-  const cierre = s.docs[0]?.data().cerradoEn?.toDate?.() ?? null;
+  const t = s.docs[0]?.data();
+  const clave = t ? `${String(t.dia ?? '').replace(/-/g, '')}_${t.turno}` : null;
+  const cierre = t && (!turno || clave === turno) ? t.cerradoEn?.toDate?.() ?? null : null;
   const limpieza = (await db.doc('config/limpieza').get()).data()?.fecha?.toDate?.() ?? null;
   if (!cierre) return limpieza;
   if (!limpieza) return cierre;
@@ -109,7 +114,7 @@ export async function autoCorregir(db, cargas) {
   // Lo que ya se cerró no se vuelve a cargar: solo cuentan las cargas que empezaron
   // después del último "Cerrar turno". Así, si el nocturno cierra y limpia el semáforo,
   // el robot no lo vuelve a llenar con esas mismas cargas.
-  const cierre = await ultimoCierre(db);
+  const cierre = await ultimoCierre(db, turno);
   if (cierre) console.log(`Corrección automática: último cierre o limpieza ${cierre.toISOString()}.`);
   const porPpu = new Map();
   let antiguas = 0;

@@ -316,14 +316,7 @@ async function sincronizarSgdc(probar) {
   await batch.commit();
   console.log(`SGDC: ${n} cargas nuevas o cambiadas guardadas (de ${cargas.length}).`);
 
-  // Corrección automática del semáforo (si el admin la dejó activada).
-  try {
-    const { autoCorregir } = await import('./auto_correccion.mjs');
-    await autoCorregir(db, cargas);
-  } catch (e) {
-    console.error('Falló la corrección automática:', e.message);
-    await anotarError(e, 'robot SGDC').catch(() => {});
-  }
+  // La corrección automática corre en main(), DESPUÉS del cierre automático.
   return { cargas, datos: horaReporte(actualizado) };
 
   // Limpieza: borra las cargas guardadas con el identificador antiguo (quedaban repetidas).
@@ -452,6 +445,18 @@ async function main() {
       fallo = true;
       console.error('Falló el cierre automático:', e.message);
       await anotarError(e, 'cierre automático').catch(() => {});
+    }
+  }
+  // Corrección automática del turno en curso (si el admin la dejó activada). Va DESPUÉS del cierre:
+  // así el cierre no se lleva a su foto cargas del turno nuevo, ni las borra al limpiar.
+  if (sgdc && !probar) {
+    try {
+      const { autoCorregir } = await import('./auto_correccion.mjs');
+      await autoCorregir(db, sgdc.cargas);
+    } catch (e) {
+      fallo = true;
+      console.error('Falló la corrección automática:', e.message);
+      await anotarError(e, 'robot SGDC').catch(() => {});
     }
   }
   if (hacerDigicar) {
