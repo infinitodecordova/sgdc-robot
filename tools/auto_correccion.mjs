@@ -10,10 +10,10 @@ const PISTOLAS = new Set([
   'A4-L', 'A4-R', 'A5-L', 'A5-R', 'A6-L', 'A6-R',
 ]);
 
-const ETIQUETAS = { pctInicial: '% INICIAL', pctFinal: '% FINAL', coordenada: 'COORDENADA', jornada: 'JORNADA/ EVENTO' };
+export const ETIQUETAS = { pctInicial: '% INICIAL', pctFinal: '% FINAL', coordenada: 'COORDENADA', jornada: 'JORNADA/ EVENTO' };
 
 /// Hora de Chile de una fecha: { dia: 'AAAAMMDD', hm: 1345 }
-function chile(d) {
+export function chile(d) {
   const p = Object.fromEntries(
     new Intl.DateTimeFormat('en-US', {
       timeZone: 'America/Santiago', hourCycle: 'h23',
@@ -24,7 +24,7 @@ function chile(d) {
 }
 
 /// Turno al que pertenece un momento: diurno 07:30–20:00; nocturno 20:00–07:30 (del día en que empezó).
-function turnoDe(d) {
+export function turnoDe(d) {
   const { dia, hm } = chile(d);
   if (hm >= 730 && hm < 2000) return `${dia}_AM`;
   if (hm >= 2000) return `${dia}_PM`;
@@ -41,7 +41,7 @@ function jornadaDe(d) {
 }
 
 const distinto = (a, b) => a != null && b != null && Math.abs(a - b) > TOLERANCIA;
-const fmt = (v) => (v == null ? '—' : String(v));
+export const fmt = (v) => (v == null ? '—' : String(v));
 
 /// ¿Algún admin está ahora dentro de su ventana de turno?
 async function adminEnTurno(db, ahora) {
@@ -55,6 +55,38 @@ async function adminEnTurno(db, ahora) {
     }
   }
   return null;
+}
+
+/// Hora del último "Cerrar turno" o "Limpiar semáforo" hecho en la app (o null si no hay).
+export async function ultimoCierre(db) {
+  const s = await db.collection('turnos').orderBy('cerradoEn', 'desc').limit(1).get();
+  const cierre = s.docs[0]?.data().cerradoEn?.toDate?.() ?? null;
+  const limpieza = (await db.doc('config/limpieza').get()).data()?.fecha?.toDate?.() ?? null;
+  if (!cierre) return limpieza;
+  if (!limpieza) return cierre;
+  return cierre > limpieza ? cierre : limpieza;
+}
+
+/// Qué hay que cambiarle a un bus del semáforo para que calce con sus cargas del SGDC
+/// (las de un turno). Devuelve { campo: { antes, despues } }; vacío si ya calza o no cargó.
+export function cambiosSgdc(b, cargasBus) {
+  const l = [...cargasBus].sort((x, y) => (x.inicio ?? 0) - (y.inicio ?? 0));
+  const cambios = {};
+  if (!l.length) return cambios;
+  const primera = l[0];
+  const ultima = l[l.length - 1];
+  const enProceso = ultima.estado && ultima.estado !== 'Finalizada';
+  const socInicio = primera.socInicio ?? null;
+  const socFin = enProceso ? null : (ultima.socFin ?? null);
+  const jornada = ultima.inicio ? jornadaDe(ultima.inicio) : null;
+  const poner = (k, v) => {
+    if (v != null && b[k] !== v) cambios[k] = { antes: b[k] ?? null, despues: v };
+  };
+  if (b.pctInicial == null || distinto(b.pctInicial, socInicio)) poner('pctInicial', socInicio);
+  if (b.pctFinal == null || distinto(b.pctFinal, socFin)) poner('pctFinal', socFin);
+  if (!b.coordenada && PISTOLAS.has(ultima.pistola)) poner('coordenada', ultima.pistola);
+  if (!b.jornada || (['M', 'T', 'N'].includes(b.jornada) && b.jornada !== jornada)) poner('jornada', jornada);
+  return cambios;
 }
 
 /// Corrige el semáforo con las cargas del SGDC del turno en curso.
@@ -74,13 +106,25 @@ export async function autoCorregir(db, cargas) {
   }
 
   const turno = turnoDe(ahora);
+  // Lo que ya se cerró no se vuelve a cargar: solo cuentan las cargas que empezaron
+  // después del último "Cerrar turno". Así, si el nocturno cierra y limpia el semáforo,
+  // el robot no lo vuelve a llenar con esas mismas cargas.
+  const cierre = await ultimoCierre(db);
+  if (cierre) console.log(`Corrección automática: último cierre o limpieza ${cierre.toISOString()}.`);
   const porPpu = new Map();
+  let antiguas = 0;
   for (const c of cargas) {
     const f = c.inicio ?? c.reserva;
     if (!f || turnoDe(f) !== turno) continue;
+    if (cierre && f <= cierre) {
+      antiguas++;
+      continue;
+    }
     if (!porPpu.has(c.ppu)) porPpu.set(c.ppu, []);
     porPpu.get(c.ppu).push(c);
   }
+
+  if (antiguas) console.log(`Corrección automática: ${antiguas} cargas son de antes del cierre de turno, no se tocan.`);
 
   const { FieldValue } = await import('firebase-admin/firestore');
   const buses = await db.collection('semaforoch').get();
@@ -89,23 +133,7 @@ export async function autoCorregir(db, cargas) {
   for (const d of buses.docs) {
     const b = d.data();
     const ppu = String(b.ppu ?? d.id).toUpperCase().replace(/[^A-Z0-9]/g, '');
-    const l = (porPpu.get(ppu) ?? []).sort((x, y) => (x.inicio ?? 0) - (y.inicio ?? 0));
-    if (!l.length) continue;
-    const primera = l[0];
-    const ultima = l[l.length - 1];
-    const enProceso = ultima.estado && ultima.estado !== 'Finalizada';
-    const socInicio = primera.socInicio ?? null;
-    const socFin = enProceso ? null : (ultima.socFin ?? null);
-    const jornada = ultima.inicio ? jornadaDe(ultima.inicio) : null;
-
-    const cambios = {};
-    const poner = (k, v) => {
-      if (v != null && b[k] !== v) cambios[k] = { antes: b[k] ?? null, despues: v };
-    };
-    if (b.pctInicial == null || distinto(b.pctInicial, socInicio)) poner('pctInicial', socInicio);
-    if (b.pctFinal == null || distinto(b.pctFinal, socFin)) poner('pctFinal', socFin);
-    if (!b.coordenada && PISTOLAS.has(ultima.pistola)) poner('coordenada', ultima.pistola);
-    if (!b.jornada || (['M', 'T', 'N'].includes(b.jornada) && b.jornada !== jornada)) poner('jornada', jornada);
+    const cambios = cambiosSgdc(b, porPpu.get(ppu) ?? []);
     if (!Object.keys(cambios).length) continue;
 
     const nuevos = Object.fromEntries(Object.entries(cambios).map(([k, v]) => [k, v.despues]));

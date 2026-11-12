@@ -72,6 +72,13 @@ function horaReal(ms) {
   t = ms - desfase(t);
   return new Date(t);
 }
+/// Hora real de "datos del reporte" del Power BI (viene como número o como texto "2026-11-12 06:13:11").
+function horaReporte(v) {
+  if (typeof v === 'number') return horaReal(v);
+  const m = String(v ?? '').match(/(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/);
+  if (!m) return null;
+  return horaReal(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] ?? 0)));
+}
 const num = (v) => {
   if (v == null || v === '') return null;
   const n = typeof v === 'number' ? v : parseFloat(String(v).replace(',', '.'));
@@ -263,6 +270,7 @@ async function sincronizarSgdc(probar) {
     console.error('Falló la corrección automática:', e.message);
     await anotarError(e, 'robot SGDC').catch(() => {});
   }
+  return { cargas, datos: horaReporte(actualizado) };
 
   // Limpieza: borra las cargas guardadas con el identificador antiguo (quedaban repetidas).
   let borradas = 0;
@@ -362,9 +370,10 @@ async function main() {
   if (!probar) await conectarFirestore(llave);
 
   let fallo = false;
+  let sgdc = null;
   if (hacerSgdc) {
     try {
-      await sincronizarSgdc(probar);
+      sgdc = await sincronizarSgdc(probar);
     } catch (e) {
       fallo = true;
       console.error('Falló el SGDC:', e.message);
@@ -378,6 +387,17 @@ async function main() {
       fallo = true;
       console.error('Falló el taller:', e.message);
       await anotarError(e, 'robot taller').catch(() => {});
+    }
+  }
+  // Cierre automático del turno si nadie lo cerró (después del SGDC y el taller, con los datos frescos).
+  if (hacerSgdc && !probar) {
+    try {
+      const { cierreAutomatico } = await import('./cierre_automatico.mjs');
+      await cierreAutomatico(db, sgdc?.cargas ?? null, sgdc?.datos ?? null);
+    } catch (e) {
+      fallo = true;
+      console.error('Falló el cierre automático:', e.message);
+      await anotarError(e, 'cierre automático').catch(() => {});
     }
   }
   if (hacerDigicar) {
