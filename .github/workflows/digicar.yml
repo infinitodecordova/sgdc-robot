@@ -16,7 +16,7 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 7
     steps:
       - name: ¿Hay turno ahora? (hora de Chile)
         id: horario
@@ -54,4 +54,5 @@ jobs:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
           MARQ_USUARIO: ${{ secrets.MARQ_USUARIO }}
           MARQ_CLAVE: ${{ secrets.MARQ_CLAVE }}
-        run: node marquesinas_sync.mjs
+        # 4 lecturas, una por minuto: el patio se ve casi en vivo.
+        run: node marquesinas_sync.mjs --vueltas 4

@@ -184,6 +184,51 @@ async function anotarError(e, origen = 'robot SGDC') {
   }, { merge: true });
 }
 
+
+// ------------------------------------------------------------ Resumen mensual del SGDC
+// sgdcMes/AAAA-MM = { datos: '{"SRPJ80_1731...": [ppu, pistola, inicio, fin, cuando, socI, socF, soh, kwh, estado, min]}' }
+// Va como texto JSON porque así no gasta índices de Firestore y cabe un mes completo (<1 MB).
+
+const msDe = (v) => (v?.toMillis ? v.toMillis() : v instanceof Date ? v.getTime() : v ?? null);
+
+/// "2026-11" según la hora de Chile.
+function claveMes(d) {
+  const f = d instanceof Date ? d : d?.toDate?.() ?? new Date();
+  return f.toLocaleDateString('sv-SE', { timeZone: 'America/Santiago' }).slice(0, 7);
+}
+
+function filaMes(c) {
+  return [c.ppu ?? null, c.pistola ?? null, msDe(c.inicio), msDe(c.fin), msDe(c.cuando),
+    c.socInicio ?? null, c.socFin ?? null, c.soh ?? null, c.kwh ?? null, c.estado ?? null, c.minutos ?? null];
+}
+
+/// Lee (o arma por primera vez) el resumen de cada mes que aparece en las cargas.
+async function leerMeses(db, cargas) {
+  const meses = new Map();
+  for (const k of new Set(cargas.map((c) => claveMes(c.cuando)))) {
+    const g = await db.doc(`sgdcMes/${k}`).get();
+    if (g.exists) {
+      let datos = {};
+      try { datos = JSON.parse(g.data().datos ?? '{}'); } catch {}
+      meses.set(k, { datos, cambio: false });
+      continue;
+    }
+    // Primera vez: se arma con lo que ya está guardado de ese mes (una sola vez por mes).
+    const [y, m] = k.split('-').map(Number);
+    const desde = new Date(Date.UTC(y, m - 1, 1, 3)); // 00:00 de Chile aprox.; el filtro fino es claveMes
+    const hasta = new Date(Date.UTC(m === 12 ? y + 1 : y, m === 12 ? 0 : m, 1, 6));
+    const s = await db.collection('sgdc').where('cuando', '>=', desde).where('cuando', '<', hasta).get();
+    const datos = {};
+    for (const d of s.docs) {
+      const c = d.data();
+      if (claveMes(c.cuando) === k) datos[d.id] = filaMes(c);
+    }
+    console.log(`SGDC: resumen de ${k} armado por primera vez con ${Object.keys(datos).length} cargas.`);
+    meses.set(k, { datos, cambio: true });
+  }
+  return meses;
+}
+
 const ppuClave = (s) => String(s ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 
 async function sincronizarSgdc(probar) {
@@ -213,18 +258,23 @@ async function sincronizarSgdc(probar) {
   const ahora = FieldValue.serverTimestamp();
 
   // Solo se escriben las cargas nuevas o que cambiaron (ahorra escrituras del plan gratis).
+  // Para saber cuáles cambiaron NO se relee cada carga (eran cientos de lecturas por hora):
+  // se compara contra el resumen del mes (sgdcMes/AAAA-MM), que es UN documento.
   const refs = cargas.map((c) => db.collection('sgdc').doc(c.id.replace(/\//g, '_')));
-  const previos = refs.length ? await db.getAll(...refs) : [];
-  const ms = (v) => (v?.toMillis ? v.toMillis() : v instanceof Date ? v.getTime() : v ?? null);
-  const igual = (a, b) => ['socInicio', 'socFin', 'kwh', 'estado', 'pistola', 'soh', 'minutos']
-    .every((k) => (a[k] ?? null) === (b[k] ?? null)) && ms(a.fin) === ms(b.fin) && ms(a.inicio) === ms(b.inicio);
+  const meses = await leerMeses(db, cargas);
 
   let batch = db.batch();
   let n = 0;
   cargas.forEach((c, i) => {
+    const mes = meses.get(claveMes(c.cuando));
+    const nueva = filaMes(c);
+    const antes = mes?.datos[refs[i].id];
+    if (antes && JSON.stringify(antes) === JSON.stringify(nueva)) return;
+    if (mes) {
+      mes.datos[refs[i].id] = nueva;
+      mes.cambio = true;
+    }
     const { id, ...resto } = c;
-    const antes = previos[i]?.exists ? previos[i].data() : null;
-    if (antes && igual(antes, resto)) return;
     batch.set(refs[i], { ...resto, actualizado: ahora }, { merge: true });
     n++;
     // El SoH de cada carga terminada queda como lectura en el historial de SoH del bus.
@@ -254,6 +304,10 @@ async function sincronizarSgdc(probar) {
     });
   }
   batch.set(db.doc('sgdcResumen/hoy'), { cargas: resumen, datosReporte: actualizado, actualizado: ahora });
+  // Resumen del mes (lo usan Estadísticas: 1 lectura en vez de miles).
+  for (const [k, m] of meses) {
+    if (m.cambio) batch.set(db.doc(`sgdcMes/${k}`), { datos: JSON.stringify(m.datos), n: Object.keys(m.datos).length, actualizado: ahora });
+  }
   batch.set(db.doc('config/sgdc'), {
     ultimaSync: ahora,
     datosReporte: actualizado,

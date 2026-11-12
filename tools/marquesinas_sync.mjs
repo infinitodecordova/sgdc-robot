@@ -72,14 +72,14 @@ function estadoDe(p) {
   return s || 'desconocido';
 }
 
-export async function sincronizarMarquesinas({ db = null, probar = false, crudo = [] } = {}) {
+export async function sincronizarMarquesinas({ db = null, probar = false, crudo = [], token: tokenPrevio = null } = {}) {
   const usuario = process.env.MARQ_USUARIO ?? '';
   const clave = process.env.MARQ_CLAVE ?? '';
   if (!usuario || !clave) {
     console.log('Marquesinas: sin usuario/clave (MARQ_USUARIO y MARQ_CLAVE), se omite.');
     return null;
   }
-  const token = await entrar(usuario, clave);
+  const token = tokenPrevio ?? (await entrar(usuario, clave)); // el token dura 2 h: se reusa entre vueltas
   const r = await pedir(`${BASE}/marquesinas/estacion/${TERMINAL}`, {
     headers: { Accept: 'application/json', authorization: `Bearer ${token}` },
   });
@@ -136,7 +136,7 @@ export async function sincronizarMarquesinas({ db = null, probar = false, crudo 
     for (const [ppu, b] of Object.entries(buses)) {
       console.log(`  ${ppu} · ${b.pistola} · ${b.estado} (código ${b.codigo}) · ${b.soc ?? '-'}% · ${b.kwh ?? '-'} kWh · ${b.tiempo ?? ''}`);
     }
-    return { pistolas, buses };
+    return { pistolas, buses, token };
   }
   const { FieldValue, Timestamp } = await import('firebase-admin/firestore');
   // "desde": cuándo quedó el bus en ese estado y pistola (para avisar si lleva rato reservado sin cargar).
@@ -144,22 +144,32 @@ export async function sincronizarMarquesinas({ db = null, probar = false, crudo 
   const previo = (await ref.get()).data() ?? {};
   const antes = previo.buses ?? {};
   const ahora = Timestamp.now();
-  // Minutos desde la pasada anterior (para medir a qué ritmo sube el %).
-  const dt = previo.actualizado?.toMillis ? (ahora.toMillis() - previo.actualizado.toMillis()) / 60000 : null;
+
   const muestras = []; // [tramo de 5 %, minutos, % subidos]
   for (const [ppu, b] of Object.entries(buses)) {
     const a = antes[ppu];
     const igual = a && a.pistola === b.pistola && a.estado === b.estado;
     b.desde = igual && a.desde ? a.desde : ahora;
-    // Ritmo de carga: % por minuto entre esta pasada y la anterior, si siguió cargando en la misma pistola.
-    if (igual && b.estado === 'cargando' && dt && dt >= 2 && dt <= 15 && a.soc != null && b.soc != null) {
-      const sube = b.soc - a.soc;
-      if (sube >= 0 && sube <= 20) {
-        b.ritmo = Math.round((sube / dt) * 1000) / 1000;
-        b.ritmoSoc = Math.round((a.soc + b.soc) / 2);
-        muestras.push([Math.min(95, Math.floor(((a.soc + b.soc) / 2) / 5) * 5), dt, sube]);
+    // Ritmo de carga (% por minuto): se mide contra un punto de referencia de hace ~5 min
+    // (el robot pasa cada 1 min y el % sube de a 1: tramos cortos darían ritmos muy saltones).
+    if (igual && b.estado === 'cargando' && b.soc != null) {
+      const ref = a.ref?.t?.toMillis ? a.ref : null;
+      const min = ref ? (ahora.toMillis() - ref.t.toMillis()) / 60000 : null;
+      if (ref && min >= 4 && min <= 15) {
+        const sube = b.soc - ref.soc;
+        if (sube >= 0 && sube <= 25) {
+          b.ritmo = Math.round((sube / min) * 1000) / 1000;
+          b.ritmoSoc = Math.round((ref.soc + b.soc) / 2);
+          muestras.push([Math.min(95, Math.floor(((ref.soc + b.soc) / 2) / 5) * 5), min, sube]);
+        }
+        b.ref = { soc: b.soc, t: ahora };
+      } else if (ref && min < 4) {
+        b.ref = ref;
+      } else {
+        b.ref = { soc: b.soc, t: ahora };
       }
-    } else if (igual && a.ritmo != null) {
+    }
+    if (b.ritmo == null && igual && a.ritmo != null) {
       b.ritmo = a.ritmo;
       b.ritmoSoc = a.ritmoSoc ?? null;
     }
@@ -182,7 +192,7 @@ export async function sincronizarMarquesinas({ db = null, probar = false, crudo 
     console.log(`Marquesinas: curva de carga actualizada con ${muestras.length} mediciones.`);
   }
   console.log('Marquesinas: guardado en Firestore.');
-  return { pistolas, buses };
+  return { pistolas, buses, token };
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
@@ -206,7 +216,26 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     try {
       const i = args.indexOf('--crudo');
       const crudo = i >= 0 && args[i + 1] ? args[i + 1].split(',') : [];
-      await sincronizarMarquesinas({ db, probar, crudo });
+      // --vueltas N: lee las pistolas N veces, una por minuto (GitHub no deja correr el robot
+      // más seguido que cada 5 min; así la app ve el patio con ~1 min de atraso).
+      const v = args.indexOf('--vueltas');
+      const vueltas = v >= 0 ? Math.max(1, Math.min(5, Number(args[v + 1]) || 1)) : 1;
+      const inicio = Date.now();
+      let token = null;
+      for (let n = 0; n < vueltas; n++) {
+        const t0 = Date.now();
+        try {
+          ({ token } = await sincronizarMarquesinas({ db, probar, crudo: n === 0 ? crudo : [], token }));
+        } catch (e) {
+          if (n === 0) throw e; // si falla la primera, se avisa como siempre
+          console.warn(`Marquesinas: falló la vuelta ${n + 1}:`, e.message);
+          token = null; // a la próxima vuelta vuelve a iniciar sesión
+        }
+        if (n + 1 >= vueltas) break;
+        // No pasarse de ~3 min 40 s en total: la próxima pasada de GitHub viene a los 5.
+        if (Date.now() - inicio > 3.5 * 60000) break;
+        await new Promise((r) => setTimeout(r, Math.max(0, 60000 - (Date.now() - t0))));
+      }
     } catch (e) {
       console.error('Falló marquesinas:', e.message);
       if (db) {
