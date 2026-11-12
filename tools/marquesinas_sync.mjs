@@ -110,8 +110,49 @@ export async function sincronizarMarquesinas({ db = null, probar = false } = {})
     }
     return { pistolas, buses };
   }
-  const { FieldValue } = await import('firebase-admin/firestore');
-  await db.doc('marquesinas/estado').set({ pistolas, buses, actualizado: FieldValue.serverTimestamp() });
+  const { FieldValue, Timestamp } = await import('firebase-admin/firestore');
+  // "desde": cuándo quedó el bus en ese estado y pistola (para avisar si lleva rato reservado sin cargar).
+  const ref = db.doc('marquesinas/estado');
+  const previo = (await ref.get()).data() ?? {};
+  const antes = previo.buses ?? {};
+  const ahora = Timestamp.now();
+  // Minutos desde la pasada anterior (para medir a qué ritmo sube el %).
+  const dt = previo.actualizado?.toMillis ? (ahora.toMillis() - previo.actualizado.toMillis()) / 60000 : null;
+  const muestras = []; // [tramo de 5 %, minutos, % subidos]
+  for (const [ppu, b] of Object.entries(buses)) {
+    const a = antes[ppu];
+    const igual = a && a.pistola === b.pistola && a.estado === b.estado;
+    b.desde = igual && a.desde ? a.desde : ahora;
+    // Ritmo de carga: % por minuto entre esta pasada y la anterior, si siguió cargando en la misma pistola.
+    if (igual && b.estado === 'cargando' && dt && dt >= 2 && dt <= 15 && a.soc != null && b.soc != null) {
+      const sube = b.soc - a.soc;
+      if (sube >= 0 && sube <= 20) {
+        b.ritmo = Math.round((sube / dt) * 1000) / 1000;
+        b.ritmoSoc = Math.round((a.soc + b.soc) / 2);
+        muestras.push([Math.min(95, Math.floor(((a.soc + b.soc) / 2) / 5) * 5), dt, sube]);
+      }
+    } else if (igual && a.ritmo != null) {
+      b.ritmo = a.ritmo;
+      b.ritmoSoc = a.ritmoSoc ?? null;
+    }
+  }
+  await ref.set({ pistolas, buses, actualizado: FieldValue.serverTimestamp() });
+
+  // Curva de carga de la flota: minutos y % acumulados por tramo de 5 % (los datos viejos pesan menos).
+  if (muestras.length) {
+    const refCurva = db.doc('config/curvaCarga');
+    const curva = (await refCurva.get()).data()?.tramos ?? {};
+    for (const [t, min, pct] of muestras) {
+      const c = curva[t] ?? { min: 0, pct: 0, n: 0 };
+      curva[t] = {
+        min: Math.round((c.min * 0.98 + min) * 100) / 100,
+        pct: Math.round((c.pct * 0.98 + pct) * 100) / 100,
+        n: (c.n ?? 0) + 1,
+      };
+    }
+    await refCurva.set({ tramos: curva, actualizado: FieldValue.serverTimestamp() });
+    console.log(`Marquesinas: curva de carga actualizada con ${muestras.length} mediciones.`);
+  }
   console.log('Marquesinas: guardado en Firestore.');
   return { pistolas, buses };
 }

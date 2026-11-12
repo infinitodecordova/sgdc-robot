@@ -337,6 +337,17 @@ export async function sincronizarDigicar({ db, dbToken = null, probar = false, f
         return dist < antes ? -1 : 1;
       })(),
       enTerminal: dist == null ? null : dist <= RADIO_TERMINAL,
+      // Última salida del terminal: hora y SoC con que se fue (para avisar si salió a ruta con poca carga).
+      salida: (() => {
+        const a = anterior.buses?.[f.ppu];
+        const ahoraDentro = dist == null ? null : dist <= RADIO_TERMINAL;
+        if (a?.enTerminal === true && ahoraDentro === false) {
+          return { fecha: Timestamp.fromDate(f.posTs ?? new Date()), soc: a.soc ?? f.soc };
+        }
+        const previa = a?.salida;
+        const f0 = previa?.fecha?.toDate?.();
+        return f0 && Date.now() - f0 < 6 * 3600 * 1000 ? previa : null;
+      })(),
       lugar: lugar?.nombre ?? null,
       lugarTipo: lugar?.tipo ?? null,
       lugarCerca: lugar?.cerca ?? false,
