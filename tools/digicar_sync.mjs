@@ -384,7 +384,10 @@ export async function sincronizarDigicar({ db, dbToken = null, probar = false, f
         const a = anterior.buses?.[f.ppu];
         const ahoraDentro = dist == null ? null : dist <= RADIO_TERMINAL;
         if (a?.enTerminal === true && ahoraDentro === false) {
-          return { fecha: Timestamp.fromDate(f.posTs ?? new Date()), soc: a.soc ?? f.soc };
+          // El SoC solo sirve si el dato del digiCAR es reciente (el bus pudo haber cargado después).
+          const socTs = f.socTs ?? a.fecha?.toDate?.() ?? null;
+          const fresco = socTs && Date.now() - socTs < 30 * 60 * 1000;
+          return { fecha: Timestamp.fromDate(f.posTs ?? new Date()), soc: fresco ? Math.max(a.soc ?? 0, f.soc ?? 0) || null : null };
         }
         const previa = a?.salida;
         const f0 = previa?.fecha?.toDate?.();
