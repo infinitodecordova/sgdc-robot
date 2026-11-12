@@ -5,6 +5,8 @@
 // Usuario y clave NUNCA van en un archivo: variables MARQ_USUARIO y MARQ_CLAVE (secretos en GitHub).
 // Probar en el PC (no sube nada; si faltan, pide usuario y clave):
 //   node marquesinas_sync.mjs --probar
+// Ver los datos crudos de algunas pistolas (para ajustar estados que no calzan con la página):
+//   node marquesinas_sync.mjs --probar --crudo A5-L,A6-L,B11-R
 
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -51,9 +53,13 @@ const num = (v) => {
 /// estado 3 = cargando; 6 = ya cargó y sigue conectado (Operativo en la página);
 /// con bus asignado pero sin cargar = reservada; el resto según connectorStatus.
 /// Mismos estados y colores que la página: disponible (verde), reservado (amarillo),
-/// cargando (azul), ocupado (rojo), operativo (morado: ya cargó, desconectado y listo para ruta).
+/// cargando (azul), ocupado (rojo), operativo (morado: ya cargó, desconectado y listo para ruta),
+/// deshabilitada (naranjo, código 5).
 function estadoDe(p) {
   const s = String(p.connectorStatus ?? '').toLowerCase();
+  // 5 = deshabilitada (naranjo en la página), aunque connectorStatus diga "Disponible".
+  // También si su último reporte de revisión la deshabilitó.
+  if (p.estado === 5 || p.ultimoReporteInfo?.deshabilita === 1) return 'deshabilitada';
   if (p.estado === 3) return 'cargando';
   if (p.estado === 6) return 'operativo';
   if (s.includes('ocup')) return 'ocupado';
@@ -66,7 +72,7 @@ function estadoDe(p) {
   return s || 'desconocido';
 }
 
-export async function sincronizarMarquesinas({ db = null, probar = false } = {}) {
+export async function sincronizarMarquesinas({ db = null, probar = false, crudo = [] } = {}) {
   const usuario = process.env.MARQ_USUARIO ?? '';
   const clave = process.env.MARQ_CLAVE ?? '';
   if (!usuario || !clave) {
@@ -79,6 +85,24 @@ export async function sincronizarMarquesinas({ db = null, probar = false } = {})
   });
   if (!r.ok) throw new Error(`Marquesinas respondió ${r.status} al leer las pistolas`);
   const j = await r.json();
+
+  // Datos crudos de las pistolas pedidas, tal como los entrega la página (sin tocar nada).
+  if (crudo.length) {
+    const quiero = new Set(crudo.map((x) => x.toUpperCase()));
+    for (const m of j.marquesinas ?? []) {
+      const { cargadores, ...restoM } = m;
+      for (const c of cargadores ?? []) {
+        const { pistolas: ps, ...restoC } = c;
+        for (const p of ps ?? []) {
+          if (!quiero.has(String(p.nombre).toUpperCase())) continue;
+          console.log(`\n===== ${p.nombre} =====`);
+          console.log('pistola:', JSON.stringify(p, null, 2));
+          console.log('cargador:', JSON.stringify(restoC, null, 2));
+          console.log('marquesina:', JSON.stringify(restoM, null, 2));
+        }
+      }
+    }
+  }
 
   const pistolas = {};
   const buses = {};
@@ -94,6 +118,10 @@ export async function sincronizarMarquesinas({ db = null, probar = false } = {})
           tiempo: p.tiempoCarga ?? null, // "01:12" = horas:minutos cargando
           temperatura: num(p.temperatura),
           bloqueada: p.enInspeccion === 1,
+          // Motivo si un reporte de revisión la deshabilitó ("REVISION DE PISTOLA · P014 P019").
+          motivo: p.ultimoReporteInfo?.deshabilita === 1
+            ? [p.ultimoReporteInfo.titulo, p.ultimoReporteInfo.descripcion].filter(Boolean).join(' · ').slice(0, 120)
+            : null,
           codigo: p.estado ?? null, // código original de la página, por si hay que ajustar
         };
         pistolas[p.nombre] = dato;
@@ -160,7 +188,7 @@ export async function sincronizarMarquesinas({ db = null, probar = false } = {})
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const args = process.argv.slice(2);
   const probar = args.includes('--probar');
-  const llave = args.find((a) => !a.startsWith('--'));
+  const llave = args.find((a, i) => !a.startsWith('--') && args[i - 1] !== '--crudo');
   (async () => {
     if (probar && !(process.env.MARQ_USUARIO && process.env.MARQ_CLAVE) && process.stdin.isTTY) {
       process.env.MARQ_USUARIO = await preguntar('Usuario de marquesinas: ');
@@ -176,7 +204,9 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
       db = admin.firestore();
     }
     try {
-      await sincronizarMarquesinas({ db, probar });
+      const i = args.indexOf('--crudo');
+      const crudo = i >= 0 && args[i + 1] ? args[i + 1].split(',') : [];
+      await sincronizarMarquesinas({ db, probar, crudo });
     } catch (e) {
       console.error('Falló marquesinas:', e.message);
       if (db) {
