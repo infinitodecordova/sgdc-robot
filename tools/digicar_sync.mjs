@@ -54,6 +54,36 @@ const LUGARES = [
 ];
 const RADIO_CERCA = 800; // metros: "Cerca de …"
 
+/// Dónde está "parado" el bus (un lugar fijo o el terminal), desde cuándo, y de dónde salió por última vez.
+/// Si llega al terminal habiendo salido de un lugar fijo hace poco, ese viaje se suma al promedio.
+///   aqui: 'Cabezal Juanita' | 'Terminal' | null;  aquiDesde: Timestamp
+///   salioDe: { lugar, fecha }  (se mantiene 3 h o hasta llegar al terminal)
+function permanencia(a, lugar, enTerminal, f, Timestamp, viajes) {
+  const ahora = f.posTs ?? new Date();
+  const aqui = lugar && !lugar.cerca ? lugar.nombre : enTerminal ? 'Terminal' : null;
+  const aquiDesde = aqui && a?.aqui === aqui && a?.aquiDesde ? a.aquiDesde : aqui ? Timestamp.fromDate(ahora) : null;
+  let salioDe = a?.salioDe ?? null;
+  // Acaba de dejar un lugar fijo (no el terminal): anotar la salida.
+  if (a?.aqui && a.aqui !== 'Terminal' && a.aqui !== aqui) {
+    salioDe = { lugar: a.aqui, fecha: Timestamp.fromDate(ahora) };
+  }
+  // Acaba de llegar al terminal: si venía de un lugar fijo, medir el viaje.
+  if (aqui === 'Terminal' && a?.aqui !== 'Terminal' && salioDe?.fecha?.toDate) {
+    const min = (ahora - salioDe.fecha.toDate()) / 60000;
+    if (min >= 3 && min <= 180) {
+      const v = viajes[salioDe.lugar] ?? { min: 0, n: 0 };
+      // Promedio que va olvidando de a poco los viajes viejos.
+      const n = Math.min((v.n ?? 0) + 1, 30);
+      viajes[salioDe.lugar] = { min: Math.round(((v.min * (n - 1) + min) / n) * 10) / 10, n };
+      console.log(`digiCAR: viaje ${salioDe.lugar} → terminal: ${Math.round(min)} min.`);
+    }
+    salioDe = null;
+  }
+  const s0 = salioDe?.fecha?.toDate?.();
+  if (s0 && ahora - s0 > 3 * 3600 * 1000) salioDe = null;
+  return { aqui, aquiDesde, salioDe };
+}
+
 /// Lugar fijo donde está el bus ({...lugar, cerca: false}) o cerca del cual va ({..., cerca: true}).
 function lugarDe(p, lugares, enCercaniaCH) {
   if (p.lat == null || p.lng == null) return null;
@@ -318,6 +348,17 @@ export async function sincronizarDigicar({ db, dbToken = null, probar = false, f
   } catch {}
   const lugares = [...LUGARES, ...extras.filter((l) => l?.lat != null && l?.lng != null && l?.nombre)];
   const buses = {};
+  // Tiempos de viaje aprendidos de cada lugar al terminal: { 'Cabezal Juanita': { min, n } }.
+  const viajes = structuredClone(anterior.viajes ?? {});
+  // Trazados F10 / F13 (se bajan de red.cl una vez al día).
+  let rutas = null;
+  try {
+    const { cargarRutas } = await import('./rutas_red.mjs');
+    rutas = await cargarRutas(db, FieldValue);
+  } catch (e) {
+    console.warn('Rutas Red:', e.message);
+  }
+  const { ubicarEnRuta } = await import('./rutas_red.mjs');
   for (const f of mios) {
     if (f.soc == null) continue;
     const tienePos = f.lat != null && f.lng != null;
@@ -349,6 +390,11 @@ export async function sincronizarDigicar({ db, dbToken = null, probar = false, f
         const f0 = previa?.fecha?.toDate?.();
         return f0 && Date.now() - f0 < 6 * 3600 * 1000 ? previa : null;
       })(),
+      ...permanencia(anterior.buses?.[f.ppu], lugar, dist == null ? null : dist <= RADIO_TERMINAL, f, Timestamp, viajes),
+      // En qué recorrido y sentido va, y cuántos km le faltan (solo en ruta: ni en el terminal ni en un lugar fijo).
+      recorrido: (dist != null && dist <= RADIO_TERMINAL) || (lugar && !lugar.cerca)
+        ? null
+        : ubicarEnRuta(rutas, f, anterior.buses?.[f.ppu], anterior.buses?.[f.ppu]?.recorrido),
       lugar: lugar?.nombre ?? null,
       lugarTipo: lugar?.tipo ?? null,
       lugarCerca: lugar?.cerca ?? false,
@@ -363,7 +409,7 @@ export async function sincronizarDigicar({ db, dbToken = null, probar = false, f
     };
   }
   const n = Object.keys(buses).length;
-  batch.set(refFlota, { buses, terminal, actualizado: FieldValue.serverTimestamp() });
+  batch.set(refFlota, { buses, terminal, viajes, actualizado: FieldValue.serverTimestamp() });
   if (terminal) {
     const dentro = Object.values(buses).filter((b) => b.enTerminal).length;
     console.log(`digiCAR: ${dentro} buses en el terminal y ${n - dentro} fuera ` +
