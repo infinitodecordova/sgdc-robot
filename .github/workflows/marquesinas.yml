@@ -1,0 +1,67 @@
+# Patio en vivo: estado de las pistolas (página de marquesinas) en Firestore, casi en tiempo real.
+# Cada corrida lee cada 30 s durante ~55 min o hasta que termine la ventana de turno
+# (08:15–18:15 y 21:45–07:45, hora de Chile). Fuera de horario sale al tiro sin leer nada.
+# Secretos: FIREBASE_SERVICE_ACCOUNT, MARQ_USUARIO y MARQ_CLAVE.
+name: Patio en vivo (marquesinas)
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+# Una sola corriendo a la vez; la siguiente espera en cola (así no quedan huecos ni dos a la vez).
+concurrency:
+  group: marquesinas
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write # para encadenar la corrida siguiente (paso final)
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: ¿Hay turno ahora? (hora de Chile)
+        id: horario
+        run: |
+          hm=$((10#$(TZ=America/Santiago date +%H%M)))
+          if { [ $hm -ge 815 ] && [ $hm -lt 1815 ]; } || [ $hm -ge 2145 ] || [ $hm -lt 745 ]; then
+            echo "si=1" >> "$GITHUB_OUTPUT"
+            echo "En turno ($hm): se lee el patio."
+          else
+            echo "Fuera de turno ($hm): no se lee el patio."
+          fi
+      - uses: actions/checkout@v5
+        if: steps.horario.outputs.si == '1'
+      - uses: actions/setup-node@v5
+        if: steps.horario.outputs.si == '1'
+        with:
+          node-version: 22
+      - name: Instalar
+        if: steps.horario.outputs.si == '1'
+        working-directory: tools
+        run: npm install --no-audit --no-fund
+      - name: Leer el patio cada 30 s (~55 min)
+        if: steps.horario.outputs.si == '1'
+        working-directory: tools
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          MARQ_USUARIO: ${{ secrets.MARQ_USUARIO }}
+          MARQ_CLAVE: ${{ secrets.MARQ_CLAVE }}
+        run: node marquesinas_sync.mjs --loop --cada 30
+      # El cron de GitHub se atrasa o se salta pasadas: si sigue el turno, la corrida deja pedida
+      # la siguiente (queda en cola por la concurrencia). Solo si esta salió bien, para no encadenar fallas.
+      - name: Encadenar la siguiente corrida si sigue el turno
+        if: success() && steps.horario.outputs.si == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          hm=$((10#$(TZ=America/Santiago date +%H%M)))
+          if { [ $hm -ge 815 ] && [ $hm -lt 1815 ]; } || [ $hm -ge 2145 ] || [ $hm -lt 745 ]; then
+            gh workflow run marquesinas.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"
+            echo "Sigue el turno ($hm): se pidió la corrida siguiente."
+          else
+            echo "Terminó el turno ($hm): no se encadena."
+          fi
