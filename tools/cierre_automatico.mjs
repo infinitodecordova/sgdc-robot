@@ -14,7 +14,7 @@
 //
 // Se apaga desde la app (config/cierreAuto.activo = false).
 
-import { chile, turnoDe, cambiosSgdc, ultimoCierre, ETIQUETAS, fmt } from './auto_correccion.mjs';
+import { chile, cambiosSgdc, ultimoCierre, turnoManual, ETIQUETAS, fmt } from './auto_correccion.mjs';
 
 const PERSISTENTES = new Set(['PT', 'AV', 'FS', 'PIEA', 'TSC']);
 // El Power BI se actualiza ~:27/:32. Para cerrar, sus datos tienen que llegar al menos hasta
@@ -103,26 +103,43 @@ export async function cierreAutomatico(db, cargas, datosSgdc) {
   }
   const ahora = new Date();
   const { hm } = chile(ahora);
-  const { turno, dia } = turnoAnterior(ahora);
+  // Turnos manuales: se cierra el turno iniciado (si ya pasó su horario). Sin turno iniciado, nada.
+  const manual = await turnoManual(db);
+  if (manual.manual && !manual.turno) {
+    console.log('Cierre automático: no hay turno iniciado.');
+    return;
+  }
+  const { turno, dia } = manual.manual ? manual : turnoAnterior(ahora);
   const id = `${dia}_${turno}`;
   const v = CIERRE[turno];
+  const [desde, hasta] = ventana(turno, dia);
 
-  if (await yaCerrado(db, turno, dia)) {
+  if (manual.manual) {
+    if (ahora < hasta) {
+      console.log(`Cierre automático: el turno ${nombre(turno)} del ${corta(dia)} sigue en curso.`);
+      return;
+    }
+  } else if (await yaCerrado(db, turno, dia)) {
     console.log(`Cierre automático: el turno ${nombre(turno)} del ${corta(dia)} ya está cerrado.`);
     return;
   }
   // Fuera del hueco entre turnos no se cierra (borraría lo del equipo que ya entró): solo se avisa.
-  const enVentana = turno === 'PM' ? hm >= v.desde && hm < v.hasta : hm >= v.desde && hm < v.hasta;
+  const enVentana = hm >= v.desde && hm < v.hasta && chile(hasta).dia === chile(ahora).dia;
   if (!enVentana) {
-    if (turno === 'PM' ? hm >= v.hasta : hm >= v.hasta || hm < 740) {
+    const atrasado = manual.manual
+      ? ahora - hasta > 15 * 60000
+      : (turno === 'PM' ? hm >= v.hasta : hm >= v.hasta || hm < 740);
+    if (atrasado) {
       await avisar(db, `${id}_sin_cerrar`,
-        `Nadie cerró el turno ${nombre(turno)} del ${corta(dia)} y el robot no alcanzó a cerrarlo antes de que entrara ` +
-        `el turno siguiente. Ciérralo tú desde CERRAR TURNO (elige ${nombre(turno)} y el día ${corta(dia)}).`);
+        manual.manual
+          ? `El turno ${nombre(turno)} del ${corta(dia)} sigue iniciado y ya terminó su horario. Ciérralo desde ` +
+            `CERRAR TURNO para que el equipo siguiente pueda iniciar el suyo.`
+          : `Nadie cerró el turno ${nombre(turno)} del ${corta(dia)} y el robot no alcanzó a cerrarlo antes de que ` +
+            `entrara el turno siguiente. Ciérralo tú desde CERRAR TURNO (elige ${nombre(turno)} y el día ${corta(dia)}).`);
     }
     return;
   }
 
-  const [desde, hasta] = ventana(turno, dia);
   const { FieldValue, Timestamp } = await import('firebase-admin/firestore');
 
   // ¿Están al día los Power BI?
@@ -241,8 +258,8 @@ export async function cierreAutomatico(db, cargas, datosSgdc) {
   const cuenta = (f) => fotos.filter(f).length;
   const [y, m, dd] = partes(dia);
   batch.set(db.collection('turnos').doc(), {
-    // El nocturno queda en el día en que empezó (23:59), igual que cuando se cierra tarde en la app.
-    fecha: Timestamp.fromDate(turno === 'PM' ? fechaChile(y, m, dd, 23, 59) : ahora),
+    // El nocturno (o uno que se cierra otro día) queda en el día en que empezó (23:59), igual que en la app.
+    fecha: Timestamp.fromDate(turno === 'PM' || chile(ahora).dia !== dia ? fechaChile(y, m, dd, 23, 59) : ahora),
     dia: conGuiones(dia),
     turno,
     cerradoPor: 'robot',
@@ -263,6 +280,12 @@ export async function cierreAutomatico(db, cargas, datosSgdc) {
     ...(ext.length ? { externos: ext.map((e) => ({ id: e.id, ...e.data() })) } : {}),
   });
   for (const e of ext) batch.delete(e.ref);
+  // Turnos manuales: el turno iniciado queda cerrado (el semáforo se bloquea hasta el siguiente).
+  if (manual.manual) {
+    batch.set(db.doc('config/app'), {
+      turnoActual: { abierto: false, cerradoEn: FieldValue.serverTimestamp(), cerradoPor: 'Cierre automático' },
+    }, { merge: true });
+  }
   batch.set(db.collection('actividad').doc(), {
     fecha: FieldValue.serverTimestamp(), uid: 'robot', nombre: 'Cierre automático', tipo: 'Cerró turno',
     detalle: `${nombre(turno) === 'nocturno' ? 'Nocturno' : 'Diurno'} del ${corta(dia)} · nadie lo cerró · ` +

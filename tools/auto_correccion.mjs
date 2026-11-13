@@ -72,6 +72,25 @@ export async function ultimoCierre(db, turno) {
   return cierre > limpieza ? cierre : limpieza;
 }
 
+/// Turno iniciado a mano (config/app.turnoActual) si el admin activó los turnos manuales.
+/// Devuelve { manual: false } si están apagados, { manual: true, turno, dia } si hay uno abierto
+/// (dia = AAAAMMDD en que empezó) o { manual: true } si no hay ninguno iniciado.
+export async function turnoManual(db) {
+  const app = (await db.doc('config/app').get()).data() ?? {};
+  if (app.turnosManuales !== true) return { manual: false };
+  const t = app.turnoActual;
+  if (!t?.abierto) return { manual: true };
+  return { manual: true, turno: t.turno === 'PM' ? 'PM' : 'AM', dia: String(t.dia ?? '').replace(/-/g, '') };
+}
+
+/// Clave 'AAAAMMDD_AM' del turno que se corrige ahora: el iniciado, o el que toca por la hora.
+/// Null si los turnos son manuales y no hay ninguno iniciado.
+async function turnoACorregir(db, ahora) {
+  const m = await turnoManual(db);
+  if (!m.manual) return turnoDe(ahora);
+  return m.turno ? `${m.dia}_${m.turno}` : null;
+}
+
 /// Qué hay que cambiarle a un bus del semáforo para que calce con sus cargas del SGDC
 /// (las de un turno). Devuelve { campo: { antes, despues } }; vacío si ya calza o no cargó.
 export function cambiosSgdc(b, cargasBus) {
@@ -102,6 +121,12 @@ export async function autoCorregir(db, cargas) {
     return;
   }
   const ahora = new Date();
+  // Turnos manuales: solo se corrige el turno iniciado; sin turno iniciado no se toca el semáforo.
+  const turno = await turnoACorregir(db, ahora);
+  if (!turno) {
+    console.log('Corrección automática: no hay turno iniciado, no se corrige.');
+    return;
+  }
   if ((cfg.modo ?? 'fueraDeTurno') === 'fueraDeTurno') {
     const quien = await adminEnTurno(db, ahora);
     if (quien) {
@@ -110,7 +135,6 @@ export async function autoCorregir(db, cargas) {
     }
   }
 
-  const turno = turnoDe(ahora);
   // Lo que ya se cerró no se vuelve a cargar: solo cuentan las cargas que empezaron
   // después del último "Cerrar turno". Así, si el nocturno cierra y limpia el semáforo,
   // el robot no lo vuelve a llenar con esas mismas cargas.
