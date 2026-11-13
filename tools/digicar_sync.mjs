@@ -201,7 +201,8 @@ async function obtenerToken(db) {
 }
 
 /// Todos los buses que el usuario ve en digiCAR, con su nombre y último SoC.
-async function consultarDigicar(token) {
+/// Con [ids] pide solo esos equipos (mucho más liviano: 48 en vez de ~658).
+async function consultarDigicar(token, ids = null) {
   const filas = [];
   for (let page = 0; page < 20; page++) {
     const r = await fetch(`${BASE}/api/entitiesQuery/find`, {
@@ -212,7 +213,9 @@ async function consultarDigicar(token) {
         'X-Authorization': `Bearer ${token}`,
       },
       body: JSON.stringify({
-        entityFilter: { type: 'entityType', resolveMultiple: true, entityType: 'DEVICE' },
+        entityFilter: ids
+          ? { type: 'entityList', entityType: 'DEVICE', entityList: ids }
+          : { type: 'entityType', resolveMultiple: true, entityType: 'DEVICE' },
         pageLink: {
           page,
           pageSize: 500,
@@ -230,7 +233,9 @@ async function consultarDigicar(token) {
         ],
       }),
     });
-    if (r.status === 401) throw new Error('digiCAR respondió 401: el token de digiCAR venció o lo anularon');
+    if (r.status === 401) {
+      throw Object.assign(new Error('digiCAR respondió 401: el token de digiCAR venció o lo anularon'), { status: 401 });
+    }
     if (r.status === 403) throw new Error('digiCAR respondió 403: el token de digiCAR no tiene permiso para ver los buses');
     if (!r.ok) throw new Error(`digiCAR respondió ${r.status}: ${(await r.text()).slice(0, 300)}`);
     const j = await r.json();
@@ -291,73 +296,35 @@ export async function pedirCredencialesSiFaltan() {
   process.env.DIGICAR_CLAVE = await preguntar('Contraseña de digiCAR (no se ve): ', true);
 }
 
-export async function sincronizarDigicar({ db, dbToken = null, probar = false, flota = null }) {
-  const acceso = await obtenerToken(dbToken ?? db);
-  if (!acceso) {
-    console.log('digiCAR: sin credenciales (DIGICAR_USUARIO y DIGICAR_CLAVE), se omite.');
-    return null;
-  }
-  const { token, fuente } = acceso;
-  const vence = fuente === 'token directo' ? acceso.vence : null; // el refresh se renueva solo
-  console.log(`digiCAR: usando ${fuente}.`);
-  const filas = await consultarDigicar(token);
-  const conSoc = filas.filter((f) => f.soc != null);
-  console.log(`digiCAR: ${filas.length} buses visibles, ${conSoc.length} con SoC.` +
-    (vence ? ` Token vence: ${vence.toLocaleDateString('es-CL', { timeZone: 'America/Santiago' })}` : ''));
-
-  if (probar) {
-    console.log('Ejemplos (nombre | etiqueta | SoC | hora):');
-    const nuestros = filas.filter((f) => /^SR/.test(ppuClave(f.nombre)) || /^SR/.test(ppuClave(f.etiqueta)));
-    for (const f of (nuestros.length ? nuestros : filas).slice(0, 12)) {
-      console.log(`  ${f.nombre} | ${f.etiqueta} | ${f.soc ?? '-'}% | ` +
-        `${f.socTs?.toLocaleString('es-CL', { timeZone: 'America/Santiago' }) ?? '-'}`);
-    }
-  }
-
-  // Nuestra flota: las PPU del semáforo (o todas si se está probando sin Firestore).
-  let mios = filas;
-  if (flota) {
-    mios = [];
-    for (const f of filas) {
-      const ppu = ppuDe(f, flota);
-      if (ppu) mios.push({ ...f, ppu });
-    }
-    console.log(`digiCAR: ${mios.length} de ${flota.size} buses de Camilo Henríquez encontrados.`);
-  }
-  if (probar) {
-    const t = buscarTerminal(flota ? mios : mios.filter((f) => /^SR/.test(ppuClave(f.nombre))));
-    console.log(t
-      ? `Terminal reconocido: ${t.n} buses juntos en ${t.lat.toFixed(5)}, ${t.lng.toFixed(5)} ` +
-        `→ https://www.google.com/maps?q=${t.lat},${t.lng}`
-      : 'Terminal: ahora no hay suficientes buses juntos para reconocerlo.');
-  }
-  if (probar || !db) return { vence, filas: mios };
-
-  const { FieldValue, Timestamp } = await import('firebase-admin/firestore');
-  const batch = db.batch();
-  // Todos los buses van en UN solo documento (digicar/flota): 1 escritura por pasada,
-  // aunque corra cada 5 minutos (288 escrituras al día en vez de ~14.000).
-  // Centro del terminal: se recalcula cuando hay hartos buses juntos; si no, se usa el guardado.
-  const refFlota = db.collection('digicar').doc('flota');
-  const anterior = (await refFlota.get()).data() ?? {};
-  let terminal = buscarTerminal(mios);
-  if (!terminal) terminal = anterior.terminal ?? null;
+/// Lugares fijos (los de aquí + los agregados en Firestore: config/lugares).
+async function leerLugares(db) {
   let extras = [];
   try {
     extras = (await db.doc('config/lugares').get()).data()?.lista ?? [];
   } catch {}
-  const lugares = [...LUGARES, ...extras.filter((l) => l?.lat != null && l?.lng != null && l?.nombre)];
+  return [...LUGARES, ...extras.filter((l) => l?.lat != null && l?.lng != null && l?.nombre)];
+}
+
+/// Trazados F10 / F13 (se bajan de red.cl una vez al día).
+async function leerRutas(db, FieldValue) {
+  try {
+    const { cargarRutas } = await import('./rutas_red.mjs');
+    return await cargarRutas(db, FieldValue);
+  } catch (e) {
+    console.warn('Rutas Red:', e.message);
+    return null;
+  }
+}
+
+/// Calcula el estado de cada bus comparando con la pasada anterior ([anterior] = lo último guardado
+/// o, en el loop, la lectura anterior en memoria). Devuelve { buses, terminal, viajes }.
+async function calcularBuses(mios, anterior, lugares, rutas, Timestamp) {
+  // Centro del terminal: se recalcula cuando hay hartos buses juntos; si no, se usa el guardado.
+  let terminal = buscarTerminal(mios);
+  if (!terminal) terminal = anterior.terminal ?? null;
   const buses = {};
   // Tiempos de viaje aprendidos de cada lugar al terminal: { 'Cabezal Juanita': { min, n } }.
   const viajes = structuredClone(anterior.viajes ?? {});
-  // Trazados F10 / F13 (se bajan de red.cl una vez al día).
-  let rutas = null;
-  try {
-    const { cargarRutas } = await import('./rutas_red.mjs');
-    rutas = await cargarRutas(db, FieldValue);
-  } catch (e) {
-    console.warn('Rutas Red:', e.message);
-  }
   const { ubicarEnRuta } = await import('./rutas_red.mjs');
   for (const f of mios) {
     if (f.soc == null) continue;
@@ -411,6 +378,59 @@ export async function sincronizarDigicar({ db, dbToken = null, probar = false, f
       })(),
     };
   }
+  return { buses, terminal, viajes };
+}
+
+export async function sincronizarDigicar({ db, dbToken = null, probar = false, flota = null }) {
+  const acceso = await obtenerToken(dbToken ?? db);
+  if (!acceso) {
+    console.log('digiCAR: sin credenciales (DIGICAR_USUARIO y DIGICAR_CLAVE), se omite.');
+    return null;
+  }
+  const { token, fuente } = acceso;
+  const vence = fuente === 'token directo' ? acceso.vence : null; // el refresh se renueva solo
+  console.log(`digiCAR: usando ${fuente}.`);
+  const filas = await consultarDigicar(token);
+  const conSoc = filas.filter((f) => f.soc != null);
+  console.log(`digiCAR: ${filas.length} buses visibles, ${conSoc.length} con SoC.` +
+    (vence ? ` Token vence: ${vence.toLocaleDateString('es-CL', { timeZone: 'America/Santiago' })}` : ''));
+
+  if (probar) {
+    console.log('Ejemplos (nombre | etiqueta | SoC | hora):');
+    const nuestros = filas.filter((f) => /^SR/.test(ppuClave(f.nombre)) || /^SR/.test(ppuClave(f.etiqueta)));
+    for (const f of (nuestros.length ? nuestros : filas).slice(0, 12)) {
+      console.log(`  ${f.nombre} | ${f.etiqueta} | ${f.soc ?? '-'}% | ` +
+        `${f.socTs?.toLocaleString('es-CL', { timeZone: 'America/Santiago' }) ?? '-'}`);
+    }
+  }
+
+  // Nuestra flota: las PPU del semáforo (o todas si se está probando sin Firestore).
+  let mios = filas;
+  if (flota) {
+    mios = [];
+    for (const f of filas) {
+      const ppu = ppuDe(f, flota);
+      if (ppu) mios.push({ ...f, ppu });
+    }
+    console.log(`digiCAR: ${mios.length} de ${flota.size} buses de Camilo Henríquez encontrados.`);
+  }
+  if (probar) {
+    const t = buscarTerminal(flota ? mios : mios.filter((f) => /^SR/.test(ppuClave(f.nombre))));
+    console.log(t
+      ? `Terminal reconocido: ${t.n} buses juntos en ${t.lat.toFixed(5)}, ${t.lng.toFixed(5)} ` +
+        `→ https://www.google.com/maps?q=${t.lat},${t.lng}`
+      : 'Terminal: ahora no hay suficientes buses juntos para reconocerlo.');
+  }
+  if (probar || !db) return { vence, filas: mios };
+
+  const { FieldValue, Timestamp } = await import('firebase-admin/firestore');
+  const batch = db.batch();
+  // Todos los buses van en UN solo documento (digicar/flota): 1 escritura por pasada.
+  const refFlota = db.collection('digicar').doc('flota');
+  const anterior = (await refFlota.get()).data() ?? {};
+  const lugares = await leerLugares(db);
+  const rutas = await leerRutas(db, FieldValue);
+  const { buses, terminal, viajes } = await calcularBuses(mios, anterior, lugares, rutas, Timestamp);
   const n = Object.keys(buses).length;
   batch.set(refFlota, { buses, terminal, viajes, actualizado: FieldValue.serverTimestamp() });
   if (terminal) {
@@ -440,12 +460,292 @@ export async function sincronizarDigicar({ db, dbToken = null, probar = false, f
   return { vence, filas: mios };
 }
 
+// ---------------------------------------------------------------- En vivo (loop)
+// Lee digiCAR cada 60 s (cada bus manda dato nuevo ~1 vez por minuto) durante ~55 min o hasta que
+// termine la ventana de turno, y decide cuándo escribir digicar/flota (cada escritura = 1 lectura
+// por celular con la app abierta):
+//   - al tiro (máx. 1 por minuto) si un bus entra/sale del terminal, llega/sale de un lugar fijo
+//     o cambia de recorrido/sentido;
+//   - si solo cambian SoC, posición o km que faltan: cada 3 min;
+//   - control cada 5 min aunque no cambie nada.
+// config/digicar (barra de datos de la app) se escribe cada 5 min.
+
+const DC_IMPORTANTE_MS = 60 * 1000;
+const DC_MENOR_MS = 3 * 60 * 1000;
+const DC_CONTROL_MS = 5 * 60 * 1000;
+const DC_CONFIG_MS = 5 * 60 * 1000;
+const DC_MAX_FALLOS_LOGIN = 3;
+const DC_MAX_FALLOS_LECTURA = 10;
+
+function hmChile(d = new Date()) {
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Santiago', hourCycle: 'h23', hour: '2-digit', minute: '2-digit',
+  }).formatToParts(d).map((x) => [x.type, x.value]));
+  return Number(p.hour) * 100 + Number(p.minute);
+}
+
+/// Horario de turno (igual que el workflow): 08:15–18:15 y 21:45–07:45, hora de Chile.
+export function enHorario(d = new Date()) {
+  const hm = hmChile(d);
+  return (hm >= 815 && hm < 1815) || hm >= 2145 || hm < 745;
+}
+
+/// Minutos que faltan para que termine la ventana de turno actual (0 si está fuera).
+function minutosHastaFinVentana(d = new Date()) {
+  const hm = hmChile(d);
+  const min = Math.floor(hm / 100) * 60 + (hm % 100);
+  if (hm >= 815 && hm < 1815) return 18 * 60 + 15 - min;
+  if (hm >= 2145) return 24 * 60 - min + 7 * 60 + 45;
+  if (hm < 745) return 7 * 60 + 45 - min;
+  return 0;
+}
+
+const horaChile = (d = new Date()) => d.toLocaleTimeString('es-CL', { timeZone: 'America/Santiago', hour12: false });
+const ms = (t) => (t?.toMillis ? t.toMillis() : null);
+
+/// Lo importante de cada bus: terminal, lugar fijo, salidas y recorrido.
+function firmaImportante(buses) {
+  const r = {};
+  for (const [ppu, b] of Object.entries(buses ?? {})) {
+    r[ppu] = [b.enTerminal, b.aqui, b.lugar, b.lugarCerca, ms(b.salida?.fecha), b.salioDe?.lugar,
+      b.recorrido?.ruta, b.recorrido?.sentido].join('|');
+  }
+  return r;
+}
+/// Lo menor: SoC, posición (~100 m) y km que faltan.
+const firmaMenor = (buses) => JSON.stringify(Object.entries(buses ?? {}).map(([ppu, b]) => [ppu, b.soc,
+  b.lat == null ? null : Math.round(b.lat * 1000), b.lng == null ? null : Math.round(b.lng * 1000), b.recorrido?.faltaKm]));
+
+/// "SRPK10 salió del terminal, SRRY13 llegó a Cabezal Juanita" (respecto a lo último escrito).
+function describirCambios(antes, ahora, buses) {
+  const l = [];
+  for (const [ppu, f] of Object.entries(ahora)) {
+    if (antes[ppu] === f) continue;
+    const [t0, aqui0] = (antes[ppu] ?? '').split('|');
+    const [t1, aqui1] = f.split('|');
+    if (t0 !== t1 && t1 === 'true') l.push(`${ppu} llegó al terminal`);
+    else if (t0 !== t1 && t1 === 'false') l.push(`${ppu} salió del terminal`);
+    else if (aqui0 !== aqui1 && aqui1) l.push(`${ppu} en ${aqui1}`);
+    else if (aqui0 !== aqui1 && aqui0) l.push(`${ppu} salió de ${aqui0}`);
+    else if (buses[ppu]?.recorrido) l.push(`${ppu} ${buses[ppu].recorrido.ruta} ${buses[ppu].recorrido.sentido}`);
+    else l.push(`${ppu} cambió`);
+  }
+  return l.length > 6 ? [...l.slice(0, 6), `y ${l.length - 6} más`] : l;
+}
+
+/// Las PPU del semáforo (guardadas un día en privado/flota para no leer los 48 buses cada vez).
+async function leerFlota(db) {
+  const ref = db.doc('privado/flota');
+  const g = await ref.get();
+  const edad = Date.now() - (g.data()?.fecha?.toMillis?.() ?? 0);
+  if (g.exists && Array.isArray(g.data().ppus) && edad < 24 * 3600 * 1000) return new Set(g.data().ppus);
+  const s = await db.collection('semaforoch').get();
+  const flota = new Set(s.docs.map((d) => ppuClave(d.data().ppu ?? d.id)));
+  const { Timestamp } = await import('firebase-admin/firestore');
+  await ref.set({ ppus: [...flota], fecha: Timestamp.now() });
+  return flota;
+}
+
+/**
+ * digiCAR en vivo: lee cada [cada] s y escribe solo cuando hace falta (ver arriba).
+ * @param escala solo para pruebas: acelera todos los tiempos.
+ */
+export async function correrDigicarEnVivo({
+  db, flota = null, cada = 60, minutos = 55, respetarHorario = true, escala = 1,
+} = {}) {
+  const T = {
+    cada: cada * 1000 * escala, imp: DC_IMPORTANTE_MS * escala, menor: DC_MENOR_MS * escala,
+    control: DC_CONTROL_MS * escala, config: DC_CONFIG_MS * escala, min: 60000 * escala,
+  };
+  const inicio = Date.now();
+  let finMs = inicio + minutos * T.min;
+  if (respetarHorario) finMs = Math.min(finMs, inicio + minutosHastaFinVentana() * T.min);
+
+  const { FieldValue, Timestamp } = await import('firebase-admin/firestore');
+  flota ??= await leerFlota(db);
+  const refFlota = db.collection('digicar').doc('flota');
+  // Lo último guardado (una lectura por corrida); después la pasada anterior queda en memoria.
+  const guardado = (await refFlota.get()).data() ?? {};
+  let anterior = guardado;
+  const lugares = await leerLugares(db);
+  const rutas = await leerRutas(db, FieldValue);
+
+  let firmaImpEscrita = firmaImportante(guardado.buses);
+  let firmaMenEscrita = firmaMenor(guardado.buses);
+  let ultimaEscritura = ms(guardado.actualizado) ?? 0;
+  let ultimaConfig = 0;
+  let escrituras = 0;
+
+  let token = null;
+  let ids = null; // ids de nuestros buses en digiCAR, si se puede pedir solo esos
+  let probadoLista = false;
+  let fallosLogin = 0;
+  let fallosLectura = 0;
+  let n = 0;
+
+  while (true) {
+    const t0 = Date.now();
+    n++;
+    try {
+      if (!token) {
+        try {
+          const acceso = await obtenerToken(db);
+          if (!acceso) throw new Error('digiCAR: sin credenciales (DIGICAR_USUARIO y DIGICAR_CLAVE)');
+          token = acceso.token; // dura ~2 h: se reusa entre lecturas
+          fallosLogin = 0;
+        } catch (e) {
+          fallosLogin++;
+          e.login = true;
+          throw e;
+        }
+      }
+      let filas;
+      const t1 = Date.now();
+      try {
+        filas = await consultarDigicar(token, ids);
+      } catch (e) {
+        if (e.status === 401) {
+          token = null;
+          e.vencido = true;
+        } else if (ids) {
+          console.log(`[${horaChile()}] digiCAR: falló la consulta solo de nuestros buses; vuelvo a la completa.`);
+          ids = null;
+        }
+        throw e;
+      }
+      const demora = Date.now() - t1;
+      fallosLectura = 0;
+      const mios = [];
+      for (const f of filas) {
+        const ppu = ppuDe(f, flota);
+        if (ppu) mios.push({ ...f, ppu });
+      }
+      // Primera lectura: ¿se puede pedir solo nuestros buses? (mucho más liviano para digiCAR)
+      if (!probadoLista) {
+        probadoLista = true;
+        const lista = mios.map((f) => f.id).filter(Boolean);
+        try {
+          const r = await consultarDigicar(token, lista);
+          if (r.length === lista.length) {
+            ids = lista;
+            console.log(`digiCAR: se piden solo nuestros ${lista.length} buses (en vez de ${filas.length}).`);
+          } else {
+            console.log(`digiCAR: pedir solo los nuestros trajo ${r.length} de ${lista.length}; sigo con la consulta completa.`);
+          }
+        } catch (e) {
+          console.log(`digiCAR: no se puede pedir solo los nuestros (${e.message}); sigo con la consulta completa.`);
+        }
+      }
+
+      const { buses, terminal, viajes } = await calcularBuses(mios, anterior, lugares, rutas, Timestamp);
+      anterior = { buses, terminal, viajes };
+      const ahoraMs = Date.now();
+      const fImp = firmaImportante(buses);
+      const fMen = firmaMenor(buses);
+      const cambioImp = JSON.stringify(fImp) !== JSON.stringify(firmaImpEscrita);
+      const cambioMen = fMen !== firmaMenEscrita;
+      const desde = ahoraMs - ultimaEscritura;
+      let motivo = null;
+      let espera = '';
+      if (cambioImp && desde >= T.imp) motivo = describirCambios(firmaImpEscrita, fImp, buses).join(', ');
+      else if (cambioImp) espera = 'cambio importante, espera 1 min desde la última';
+      else if (cambioMen && desde >= T.menor) motivo = 'SoC / posición';
+      else if (desde >= T.control) motivo = 'control (sin cambios)';
+      else espera = cambioMen ? `SoC/posición cambió, espera ${Math.ceil((T.menor - desde) / 1000 / escala)} s` : 'sin cambios';
+
+      const dentro = Object.values(buses).filter((b) => b.enTerminal).length;
+      const resumen = `${mios.length} buses, ${dentro} en terminal · consulta ${demora} ms`;
+      if (motivo) {
+        await refFlota.set({ buses, terminal, viajes, actualizado: FieldValue.serverTimestamp() });
+        escrituras++;
+        ultimaEscritura = ahoraMs;
+        firmaImpEscrita = fImp;
+        firmaMenEscrita = fMen;
+        console.log(`[${horaChile()}] ${resumen} · ESCRIBIÓ #${escrituras} (${motivo})`);
+      } else {
+        console.log(`[${horaChile()}] ${resumen} · no escribe (${espera})`);
+      }
+      if (ahoraMs - ultimaConfig >= T.config) {
+        await db.doc('config/digicar').set({
+          ultimaSync: FieldValue.serverTimestamp(), buses: mios.length, tokenVence: null,
+        }, { merge: true });
+        ultimaConfig = ahoraMs;
+      }
+    } catch (e) {
+      let fatal;
+      if (e.login) {
+        console.warn(`[${horaChile()}] digiCAR: falló el inicio de sesión (${fallosLogin}/${DC_MAX_FALLOS_LOGIN}):`, e.message);
+        fatal = fallosLogin >= DC_MAX_FALLOS_LOGIN;
+      } else {
+        fallosLectura++;
+        console.warn(`[${horaChile()}] digiCAR: ${e.vencido ? 'el token venció' : 'falló la lectura'} ` +
+          `(${fallosLectura}/${DC_MAX_FALLOS_LECTURA}):`, e.message);
+        fatal = fallosLectura >= DC_MAX_FALLOS_LECTURA;
+      }
+      if (fatal) throw e;
+      if (e.vencido && fallosLectura === 1) continue; // vuelve a entrar al tiro
+    }
+    if (Date.now() + T.cada > finMs) break;
+    await new Promise((r) => setTimeout(r, Math.max(0, T.cada - (Date.now() - t0))));
+  }
+  const dur = Math.round((Date.now() - inicio) / T.min);
+  console.log(`digiCAR: fin de la corrida · ${n} lecturas en ${dur} min · ${escrituras} escrituras.`);
+}
+
+async function anotarErrorDigicar(db, e) {
+  if (!db) return;
+  const { FieldValue } = await import('firebase-admin/firestore');
+  const dia = new Date().toLocaleDateString('sv-SE', { timeZone: 'America/Santiago' }).replace(/-/g, '');
+  const mensaje = String(e?.message ?? e).slice(0, 1500);
+  let h = 0x811c9dc5;
+  for (const c of mensaje.split('\n')[0]) h = Math.imul(h ^ c.charCodeAt(0), 0x01000193) >>> 0;
+  await db.collection('errores').doc(`${dia}_robot_${h.toString(16)}`).set({
+    origen: 'robot digiCAR', donde: 'GitHub Actions · sgdc-robot', mensaje,
+    stack: String(e?.stack ?? '').slice(0, 4000), plataforma: 'GitHub',
+    ultima: FieldValue.serverTimestamp(), ultimoUsuario: 'robot',
+    usuarios: FieldValue.arrayUnion('robot'), veces: FieldValue.increment(1), resuelto: false,
+  }, { merge: true }).catch(() => {});
+}
+
 // ---------------------------------------------------------------- Uso directo
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const args = process.argv.slice(2);
   const probar = args.includes('--probar');
-  const llave = args.find((a) => !a.startsWith('--'));
-  (async () => {
+  const conValor = new Set(['--cada', '--minutos']);
+  const llave = args.find((a, i) => !a.startsWith('--') && !conValor.has(args[i - 1]));
+  const valor = (k) => {
+    const i = args.indexOf(k);
+    return i >= 0 ? Number(args[i + 1]) : NaN;
+  };
+  // --loop: digiCAR en vivo (workflow digicar.yml). Necesita Firestore (no se usa con --probar).
+  if (args.includes('--loop')) {
+    (async () => {
+      const siempre = args.includes('--siempre');
+      if (!siempre && !enHorario()) {
+        console.log(`digiCAR: fuera de horario (${horaChile()}): no se lee nada.`);
+        return;
+      }
+      await pedirCredencialesSiFaltan();
+      const admin = (await import('firebase-admin')).default;
+      const cred = process.env.FIREBASE_SERVICE_ACCOUNT
+        ? JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
+        : JSON.parse(readFileSync(llave ?? 'serviceAccount.json', 'utf8'));
+      admin.initializeApp({ credential: admin.credential.cert(cred) });
+      const db = admin.firestore();
+      try {
+        await correrDigicarEnVivo({
+          db,
+          cada: Math.max(20, valor('--cada') || 60),
+          minutos: Math.max(1, Math.min(58, valor('--minutos') || 55)),
+          respetarHorario: !siempre,
+        });
+      } catch (e) {
+        console.error('Falló digiCAR:', e.message);
+        await anotarErrorDigicar(db, e);
+        process.exit(1);
+      }
+    })();
+  } else (async () => {
     let db = null;
     let admin = null;
     let flota = null;

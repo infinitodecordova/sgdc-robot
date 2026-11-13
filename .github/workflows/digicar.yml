@@ -1,22 +1,29 @@
-# Trae el SoC de digiCAR a Firestore cada 5 minutos, solo en horario de turno
-# (Diurno 08:30–18:00 y Nocturno 22:00–07:30, con 15 min de margen a cada lado).
+# digiCAR en vivo: SoC y posición de los buses en Firestore, casi en tiempo real.
+# En horario de turno (08:15–18:15 y 21:45–07:45, hora de Chile) cada corrida lee digiCAR cada 60 s
+# durante ~55 min (cada bus manda dato nuevo ~1 vez por minuto) y encadena la siguiente.
+# Fuera de turno, si se pide a mano ("Actualizar SOC"), hace una sola pasada como antes.
 # Secretos: FIREBASE_SERVICE_ACCOUNT, DIGICAR_USUARIO y DIGICAR_CLAVE.
 # El estado en vivo de las pistolas (marquesinas) corre aparte: marquesinas.yml.
 name: Sincronizar digiCAR
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/30 * * * *'
   workflow_dispatch:
 
+# Una sola corriendo a la vez; la siguiente espera en cola (sin huecos ni dos a la vez).
 concurrency:
   group: digicar
   cancel-in-progress: false
 
+permissions:
+  contents: read
+  actions: write # para encadenar la corrida siguiente (paso final)
+
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 7
+    timeout-minutes: 60
     steps:
       - name: ¿Hay turno ahora? (hora de Chile)
         id: horario
@@ -24,9 +31,9 @@ jobs:
           hm=$((10#$(TZ=America/Santiago date +%H%M)))
           if { [ $hm -ge 815 ] && [ $hm -lt 1815 ]; } || [ $hm -ge 2145 ] || [ $hm -lt 745 ]; then
             echo "si=1" >> "$GITHUB_OUTPUT"
-            echo "En turno ($hm): se consulta digiCAR."
+            echo "En turno ($hm): digiCAR en vivo."
           else
-            echo "Fuera de turno ($hm): no se consulta digiCAR."
+            echo "Fuera de turno ($hm): solo si se pidió a mano, una pasada."
           fi
       - uses: actions/checkout@v5
         if: steps.horario.outputs.si == '1' || github.event_name == 'workflow_dispatch'
@@ -38,12 +45,33 @@ jobs:
         if: steps.horario.outputs.si == '1' || github.event_name == 'workflow_dispatch'
         working-directory: tools
         run: npm install --no-audit --no-fund
-      - name: Traer SoC de digiCAR
-        if: steps.horario.outputs.si == '1' || github.event_name == 'workflow_dispatch'
+      - name: digiCAR en vivo (cada 60 s, ~55 min)
+        if: steps.horario.outputs.si == '1'
+        working-directory: tools
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          DIGICAR_USUARIO: ${{ secrets.DIGICAR_USUARIO }}
+          DIGICAR_CLAVE: ${{ secrets.DIGICAR_CLAVE }}
+        run: node digicar_sync.mjs --loop --cada 60
+      - name: Traer SoC una vez (fuera de turno, pedido a mano)
+        if: steps.horario.outputs.si != '1' && github.event_name == 'workflow_dispatch'
         working-directory: tools
         env:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
           DIGICAR_USUARIO: ${{ secrets.DIGICAR_USUARIO }}
           DIGICAR_CLAVE: ${{ secrets.DIGICAR_CLAVE }}
         run: node sgdc_sync.mjs --solo-digicar
-# El estado de las pistolas (marquesinas) va aparte, en marquesinas.yml (casi en vivo).
+      # El cron de GitHub se atrasa o se salta pasadas: si sigue el turno, la corrida deja pedida
+      # la siguiente (queda en cola por la concurrencia). Solo si esta salió bien.
+      - name: Encadenar la siguiente corrida si sigue el turno
+        if: success() && steps.horario.outputs.si == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          hm=$((10#$(TZ=America/Santiago date +%H%M)))
+          if { [ $hm -ge 815 ] && [ $hm -lt 1815 ]; } || [ $hm -ge 2145 ] || [ $hm -lt 745 ]; then
+            gh workflow run digicar.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"
+            echo "Sigue el turno ($hm): se pidió la corrida siguiente."
+          else
+            echo "Terminó el turno ($hm): no se encadena."
+          fi
