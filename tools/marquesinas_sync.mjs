@@ -240,9 +240,12 @@ function paraFirestore(buses, Timestamp) {
 /// Lo importante de cada pistola: estado, bus conectado y motivo.
 const firmaImportante = (pistolas) =>
   Object.fromEntries(Object.entries(pistolas).map(([n, p]) => [n, `${p.estado}|${p.ppu ?? ''}|${p.motivo ?? ''}|${p.bloqueada}`]));
-/// Lo menor: SoC, kWh, tiempo y temperatura.
+/// Lo menor: SoC, kWh y tiempo de las pistolas que están cargando. La temperatura no cuenta
+/// (cambia sola aunque no cargue nada y la app no la muestra; se guarda igual en la próxima escritura).
 const firmaMenor = (pistolas) =>
-  JSON.stringify(Object.entries(pistolas).map(([n, p]) => [n, p.soc, p.kwh, p.tiempo, p.temperatura]));
+  JSON.stringify(Object.entries(pistolas)
+    .filter(([, p]) => p.estado === 'cargando')
+    .map(([n, p]) => [n, p.soc, p.kwh, p.tiempo]));
 
 /// "B9-L cargando→operativo, A2-R conectó SRPK10" (cambios importantes respecto a lo último escrito).
 function describirCambios(antes, ahora) {
