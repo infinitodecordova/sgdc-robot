@@ -8,8 +8,8 @@
 // ventana de turno (08:15–18:15 y 21:45–07:45, hora de Chile). Fuera de horario sale al tiro.
 //   node marquesinas_sync.mjs --loop --cada 30
 // Escribe en Firestore AL TIRO si cambia algo importante (estado de una pistola, bus que se conecta
-// o desconecta, motivo de deshabilitada); si solo cambia SoC/tiempo/temperatura, máximo una vez por
-// minuto; y una escritura de control cada 5 min aunque no cambie nada (la app da el patio por
+// o desconecta, motivo de deshabilitada); si solo cambia SoC/tiempo/temperatura, máximo una vez cada
+// 2 min; y una escritura de control cada 5 min aunque no cambie nada (la app da el patio por
 // desactualizado a los 20 min). Tope: ~150 escrituras por corrida; pasado el tope, cada 2 min.
 //
 // Probar en el PC (no sube nada; si faltan, pide usuario y clave):
@@ -27,7 +27,7 @@ const BASE = 'http://186.67.130.114:8091/api/v2';
 const TERMINAL = 6; // Camilo Henríquez
 
 // Escrituras en Firestore (cada una = 1 lectura por celular con la app abierta).
-const ESCRITURA_SOC_MS = 60 * 1000; // si solo cambia SoC/tiempo/temperatura
+const ESCRITURA_SOC_MS = 2 * 60 * 1000; // si solo cambia SoC/tiempo/temperatura (sube ~1 % cada 2 min)
 const ESCRITURA_CONTROL_MS = 5 * 60 * 1000; // aunque no cambie nada, para que la app lo vea vigente
 const TOPE_ESCRITURAS = 150; // por corrida
 const ESCRITURA_TOPE_MS = 2 * 60 * 1000; // pasado el tope
