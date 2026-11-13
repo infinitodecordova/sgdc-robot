@@ -405,17 +405,9 @@ async function sincronizarTaller(probar) {
   console.log(`Taller: ${n} buses guardados en Firestore.`);
 }
 
-async function main() {
-  const args = process.argv.slice(2);
-  const probar = args.includes('--probar');
-  const llave = args.find((a) => !a.startsWith('--'));
-  const solo = (x) => args.includes(`--solo-${x}`);
-  const alguno = solo('sgdc') || solo('digicar') || solo('taller');
-  const hacerSgdc = alguno ? solo('sgdc') : true;
-  const hacerTaller = alguno ? solo('taller') : true;
-  const hacerDigicar = alguno ? solo('digicar') : !args.includes('--sin-digicar');
-  if (!probar) await conectarFirestore(llave);
-
+/// Una pasada: SGDC y/o taller y, si se trajo el SGDC, cierre automático y corrección (en ese orden).
+/// Devuelve { fallo, sgdc } (sgdc = { cargas, datos } o null).
+async function pasada({ hacerSgdc, hacerTaller, probar = false }) {
   let fallo = false;
   let sgdc = null;
   if (hacerSgdc) {
@@ -437,28 +429,158 @@ async function main() {
     }
   }
   // Cierre automático del turno si nadie lo cerró (después del SGDC y el taller, con los datos frescos).
-  if (hacerSgdc && !probar) {
-    try {
-      const { cierreAutomatico } = await import('./cierre_automatico.mjs');
-      await cierreAutomatico(db, sgdc?.cargas ?? null, sgdc?.datos ?? null);
-    } catch (e) {
-      fallo = true;
-      console.error('Falló el cierre automático:', e.message);
-      await anotarError(e, 'cierre automático').catch(() => {});
-    }
-  }
+  if (hacerSgdc && !probar) fallo = (await cerrarSiFalta(sgdc)) || fallo;
   // Corrección automática del turno en curso (si el admin la dejó activada). Va DESPUÉS del cierre:
   // así el cierre no se lleva a su foto cargas del turno nuevo, ni las borra al limpiar.
-  if (sgdc && !probar) {
-    try {
-      const { autoCorregir } = await import('./auto_correccion.mjs');
-      await autoCorregir(db, sgdc.cargas);
-    } catch (e) {
-      fallo = true;
-      console.error('Falló la corrección automática:', e.message);
-      await anotarError(e, 'robot SGDC').catch(() => {});
-    }
+  if (sgdc && !probar) fallo = (await corregir(sgdc)) || fallo;
+  return { fallo, sgdc };
+}
+
+/// Corrección automática con las cargas ya traídas. Devuelve true si falló.
+async function corregir(sgdc) {
+  try {
+    const { autoCorregir } = await import('./auto_correccion.mjs');
+    await autoCorregir(db, sgdc.cargas);
+    return false;
+  } catch (e) {
+    console.error('Falló la corrección automática:', e.message);
+    await anotarError(e, 'robot SGDC').catch(() => {});
+    return true;
   }
+}
+
+/// Cierre automático con las cargas ya traídas. Devuelve true si falló.
+async function cerrarSiFalta(sgdc) {
+  try {
+    const { cierreAutomatico } = await import('./cierre_automatico.mjs');
+    await cierreAutomatico(db, sgdc?.cargas ?? null, sgdc?.datos ?? null);
+    return false;
+  } catch (e) {
+    console.error('Falló el cierre automático:', e.message);
+    await anotarError(e, 'cierre automático').catch(() => {});
+    return true;
+  }
+}
+
+// ------------------------------------------------------------ Vigilar los Power BI
+// Los dos Power BI (SGDC y taller) se actualizan ~1 vez por hora (~:25–:32). En vez de esperar un cron
+// que GitHub atrasa o se salta, cada 2 min se consulta SOLO la hora de actualización de cada reporte
+// (consulta liviana) y, apenas cambia, se trae ese reporte. A las :40 de cada hora se hace igual la
+// pasada de siempre (cierre automático y corrección), con lo que ya está en memoria si es reciente.
+
+/// Hora "datos del reporte" del SGDC, tal como viene (para comparar con config/sgdc.datosReporte).
+async function horaDatosSgdc() {
+  const u = decodificar(await consultar(C.actualizacion));
+  return Object.values(u.filas[0] ?? {})[0] ?? null;
+}
+
+/// Hora de los datos del reporte de taller (para comparar con taller/flota.datos).
+async function horaDatosTaller() {
+  const T = JSON.parse(readFileSync(join(aqui, 'taller_consultas.json'), 'utf8'));
+  const u = decodificar(await consultar(T.actualizacion, T));
+  return horaReal(Object.values(u.filas[0] ?? {})[0]);
+}
+
+let minutoForzado = null; // solo pruebas
+
+/// Minuto de la hora de Chile y una clave por hora ("2026111320").
+function horaChileAhora() {
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Santiago', hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit',
+  }).formatToParts(new Date()).map((x) => [x.type, x.value]));
+  const minuto = minutoForzado ?? Number(p.minute);
+  return { minuto, clave: `${p.year}${p.month}${p.day}${p.hour}`, texto: `${p.hour}:${String(minuto).padStart(2, '0')}` };
+}
+
+async function vigilar({ minutos = 55, cadaMin = 2, escala = 1 } = {}) {
+  const fin = Date.now() + minutos * 60000 * escala;
+  let ultSgdc = (await db.doc('config/sgdc').get()).data()?.datosReporte ?? null;
+  let ultTaller = (await db.doc('taller/flota').get()).data()?.datos?.toMillis?.() ?? null;
+  let sgdc = null; // última pasada del SGDC (cargas en memoria)
+  let horaSync = 0;
+  let tickHecho = null; // hora en que ya se hizo la pasada de las :40
+  let fallosSeguidos = 0;
+  let fallo = false;
+  console.log(`Vigilando los Power BI cada ${cadaMin} min (SGDC: ${ultSgdc ?? '—'}).`);
+  while (Date.now() < fin) {
+    const t0 = Date.now();
+    const h = horaChileAhora();
+    const hizo = [];
+    try {
+      const hs = await horaDatosSgdc();
+      if (hs != null && JSON.stringify(hs) !== JSON.stringify(ultSgdc)) {
+        const r = await pasada({ hacerSgdc: true, hacerTaller: false });
+        fallo = r.fallo || fallo;
+        if (r.sgdc) {
+          sgdc = r.sgdc;
+          horaSync = Date.now();
+          ultSgdc = hs;
+          hizo.push(`SGDC nuevo (datos ${hs})`);
+        }
+      }
+      const ht = await horaDatosTaller();
+      if (ht && ht.getTime() !== ultTaller) {
+        await sincronizarTaller(false);
+        ultTaller = ht.getTime();
+        hizo.push(`taller nuevo (datos ${ht.toLocaleTimeString('es-CL', { timeZone: 'America/Santiago' })})`);
+      }
+      fallosSeguidos = 0;
+    } catch (e) {
+      fallosSeguidos++;
+      console.warn(`[${h.texto}] No se pudo revisar el Power BI (${fallosSeguidos} seguidas):`, e.message);
+      if (fallosSeguidos === 3) await anotarError(e, 'robot SGDC').catch(() => {});
+    }
+    // La pasada de las :40 (como el cron de siempre): cierre automático y corrección.
+    if (h.minuto >= 40 && tickHecho !== h.clave) {
+      tickHecho = h.clave;
+      if (sgdc && Date.now() - horaSync < 25 * 60000 * escala) {
+        fallo = (await cerrarSiFalta(sgdc)) || fallo;
+        fallo = (await corregir(sgdc)) || fallo;
+        hizo.push('pasada de las :40 (con el SGDC recién traído)');
+      } else {
+        const r = await pasada({ hacerSgdc: true, hacerTaller: true });
+        fallo = r.fallo || fallo;
+        if (r.sgdc) {
+          sgdc = r.sgdc;
+          horaSync = Date.now();
+        }
+        hizo.push('pasada de las :40 (SGDC y taller completos)');
+      }
+    }
+    console.log(`[${h.texto}] ${hizo.length ? hizo.join(' · ') : 'sin datos nuevos'}`);
+    const espera = cadaMin * 60000 * escala - (Date.now() - t0);
+    if (Date.now() + espera >= fin) break;
+    await new Promise((ok) => setTimeout(ok, Math.max(0, espera)));
+  }
+  console.log('Vigilancia terminada.');
+  return fallo;
+}
+
+/// Solo para las pruebas simuladas (no se usa en el robot).
+export const _paraPruebas = { vigilar, usarDb: (x) => { db = x; }, minuto: (m) => { minutoForzado = m; } };
+
+async function main() {
+  const args = process.argv.slice(2);
+  const probar = args.includes('--probar');
+  const conValor = new Set(['--minutos']);
+  const llave = args.find((a, i) => !a.startsWith('--') && !conValor.has(args[i - 1]));
+  const solo = (x) => args.includes(`--solo-${x}`);
+  const alguno = solo('sgdc') || solo('digicar') || solo('taller');
+  const hacerSgdc = alguno ? solo('sgdc') : true;
+  const hacerTaller = alguno ? solo('taller') : true;
+  const hacerDigicar = alguno ? solo('digicar') : !args.includes('--sin-digicar');
+  if (!probar) await conectarFirestore(llave);
+
+  // --vigilar: ~55 min revisando los Power BI (workflow sgdc.yml); termina con error si algo falló.
+  if (args.includes('--vigilar') && !probar) {
+    const i = args.indexOf('--minutos');
+    const minutos = i >= 0 ? Math.max(1, Math.min(58, Number(args[i + 1]) || 55)) : 55;
+    if (await vigilar({ minutos })) process.exit(1);
+    return;
+  }
+
+  let { fallo } = await pasada({ hacerSgdc, hacerTaller, probar });
   if (hacerDigicar) {
     try {
       const flota = await obtenerFlota();

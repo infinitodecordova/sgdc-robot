@@ -1,17 +1,35 @@
-# Trae las cargas del SGDC (Power BI) a Firestore una vez por hora.
+# SGDC (cargas, Power BI) y buses en taller, apenas se publican.
+# Los dos Power BI se actualizan ~1 vez por hora (~:25–:32). Cada corrida "vigila" ~55 min: cada 2 min
+# consulta solo la hora de actualización de cada reporte y, apenas cambia, lo trae. A las :40 hace la
+# pasada de siempre (cierre automático y corrección). Corre todo el día y encadena la corrida siguiente.
+# Un pedido a mano desde la app ("Actualizar SGDC") hace una sola pasada al tiro, aparte.
 # Secretos: FIREBASE_SERVICE_ACCOUNT.
 name: Sincronizar SGDC
 
 on:
   schedule:
-    # El Power BI actualiza ~:27/:32: se revisa a las :40.
-    - cron: '40 * * * *'
+    # Por si se corta la cadena: GitHub atrasa o se salta muchas pasadas programadas.
+    - cron: '10,40 * * * *'
   workflow_dispatch:
+    inputs:
+      vigilar:
+        description: 'Vigilar ~55 min (true) o una sola pasada (false)'
+        type: boolean
+        default: false
+
+# El vigilante: uno a la vez y el siguiente en cola. Los pedidos a mano van aparte (no esperan).
+concurrency:
+  group: ${{ (github.event_name == 'schedule' || inputs.vigilar) && 'sgdc-vigilar' || 'sgdc-manual' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write # para encadenar la corrida siguiente (paso final)
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -20,8 +38,22 @@ jobs:
       - name: Instalar
         working-directory: tools
         run: npm install --no-audit --no-fund
-      - name: Traer SGDC y buses en taller
+      - name: Vigilar los Power BI (~55 min)
+        if: github.event_name == 'schedule' || inputs.vigilar
+        working-directory: tools
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: node sgdc_sync.mjs --sin-digicar --vigilar
+      - name: Traer SGDC y buses en taller (una pasada, pedida a mano)
+        if: github.event_name == 'workflow_dispatch' && !inputs.vigilar
         working-directory: tools
         env:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
         run: node sgdc_sync.mjs --sin-digicar
+      # Deja pedida la corrida siguiente (queda en cola por la concurrencia). Corre todo el día:
+      # el cierre automático de las 20:40 queda fuera del horario de turno.
+      - name: Encadenar la siguiente corrida
+        if: success() && (github.event_name == 'schedule' || inputs.vigilar)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run sgdc.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f vigilar=true

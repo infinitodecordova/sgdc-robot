@@ -291,6 +291,19 @@ export async function cierreAutomatico(db, cargas, datosSgdc) {
     detalle: `${nombre(turno) === 'nocturno' ? 'Nocturno' : 'Diurno'} del ${corta(dia)} · nadie lo cerró · ` +
       `${corregidos.length} corregidos · limpió el semáforo`,
   });
+  // Candado: si otra corrida (el vigilante y un pedido a mano) intenta cerrar el mismo turno en la
+  // misma hora, solo una lo hace. create() falla si el documento ya existe.
+  const c = chile(ahora);
+  try {
+    await db.collection('privado').doc(`cierre_${id}_${c.dia}${String(Math.floor(c.hm / 100)).padStart(2, '0')}`)
+      .create({ fecha: FieldValue.serverTimestamp() });
+  } catch (e) {
+    if (e.code === 6 || /already exists/i.test(e.message)) {
+      console.log(`Cierre automático: otra corrida ya está cerrando el ${nombre(turno)} del ${corta(dia)}; no se repite.`);
+      return;
+    }
+    throw e;
+  }
   await batch.commit();
   console.log(`Cierre automático: turno ${nombre(turno)} del ${corta(dia)} cerrado (${corregidos.length} corregidos).`);
   for (const r of corregidos) console.log('  ', r);
