@@ -1,6 +1,8 @@
 # Patio en vivo: estado de las pistolas (página de marquesinas) en Firestore, casi en tiempo real.
 # Cada corrida lee cada 30 s durante ~55 min o hasta que termine la ventana de turno
-# (08:15–18:15 y 21:45–07:45, hora de Chile). Fuera de horario sale al tiro sin leer nada.
+# (08:15–18:15 y 21:45–07:45, hora de Chile). Fuera de horario sale al tiro sin leer nada,
+# salvo que lo lance el botón "Iniciar turno" (turno=true): lee desde ya y encadena hasta la ventana.
+# Respaldo: el vigilante del SGDC (sgdc.yml) lo lanza si en horario no está corriendo.
 # Secretos: FIREBASE_SERVICE_ACCOUNT, MARQ_USUARIO y MARQ_CLAVE.
 name: Patio en vivo (marquesinas)
 
@@ -8,6 +10,11 @@ on:
   schedule:
     - cron: '*/30 * * * *'
   workflow_dispatch:
+    inputs:
+      turno:
+        description: 'Lanzado al iniciar turno: leer aunque falte para el horario'
+        type: boolean
+        default: false
 
 # Una sola corriendo a la vez; la siguiente espera en cola (así no quedan huecos ni dos a la vez).
 concurrency:
@@ -30,6 +37,10 @@ jobs:
           if { [ $hm -ge 815 ] && [ $hm -lt 1815 ]; } || [ $hm -ge 2145 ] || [ $hm -lt 745 ]; then
             echo "si=1" >> "$GITHUB_OUTPUT"
             echo "En turno ($hm): se lee el patio."
+          elif [ "${{ inputs.turno }}" = "true" ]; then
+            echo "si=1" >> "$GITHUB_OUTPUT"
+            echo "antes=1" >> "$GITHUB_OUTPUT"
+            echo "Turno iniciado antes del horario ($hm): se lee el patio desde ya."
           else
             echo "Fuera de turno ($hm): no se lee el patio."
           fi
@@ -50,7 +61,7 @@ jobs:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
           MARQ_USUARIO: ${{ secrets.MARQ_USUARIO }}
           MARQ_CLAVE: ${{ secrets.MARQ_CLAVE }}
-        run: node marquesinas_sync.mjs --loop --cada 30
+        run: node marquesinas_sync.mjs --loop --cada 30 ${{ steps.horario.outputs.antes == '1' && '--siempre' || '' }}
       # El cron de GitHub se atrasa o se salta pasadas: si sigue el turno, la corrida deja pedida
       # la siguiente (queda en cola por la concurrencia). Solo si esta salió bien, para no encadenar fallas.
       - name: Encadenar la siguiente corrida si sigue el turno
@@ -62,6 +73,9 @@ jobs:
           if { [ $hm -ge 815 ] && [ $hm -lt 1815 ]; } || [ $hm -ge 2145 ] || [ $hm -lt 745 ]; then
             gh workflow run marquesinas.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"
             echo "Sigue el turno ($hm): se pidió la corrida siguiente."
+          elif [ "${{ steps.horario.outputs.antes }}" = "1" ]; then
+            gh workflow run marquesinas.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f turno=true
+            echo "Turno iniciado, aún antes del horario ($hm): se pidió la siguiente."
           else
             echo "Terminó el turno ($hm): no se encadena."
           fi

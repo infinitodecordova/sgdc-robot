@@ -493,6 +493,48 @@ function horaChileAhora() {
   return { minuto, clave: `${p.year}${p.month}${p.day}${p.hour}`, texto: `${p.hour}:${String(minuto).padStart(2, '0')}` };
 }
 
+// ------------------------------------------------------------ Respaldo: patio y digiCAR en vivo
+// El cron de GitHub se salta pasadas (el 13-11 el patio nocturno nunca arrancó). En horario de turno,
+// cada 4 min el vigilante pregunta a GitHub si marquesinas.yml y digicar.yml tienen una corrida
+// andando o en cola; si no, la lanza. No toca Firestore. Necesita GH_TOKEN y GITHUB_REPOSITORY.
+const ROBOTS_EN_VIVO = ['marquesinas.yml', 'digicar.yml'];
+
+/// Horario de turno de los robots en vivo: 08:15–18:15 y 21:45–07:45 (hora de Chile).
+function enHorarioEnVivo(d = new Date()) {
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Santiago', hourCycle: 'h23', hour: '2-digit', minute: '2-digit',
+  }).formatToParts(d).map((x) => [x.type, x.value]));
+  const hm = Number(p.hour) * 100 + Number(p.minute);
+  return (hm >= 815 && hm < 1815) || hm >= 2145 || hm < 745;
+}
+
+async function github(ruta, opciones = {}) {
+  const r = await fetch(`https://api.github.com/repos/${process.env.GITHUB_REPOSITORY}${ruta}`, {
+    ...opciones,
+    headers: {
+      Accept: 'application/vnd.github+json',
+      Authorization: `Bearer ${process.env.GH_TOKEN}`,
+      'X-GitHub-Api-Version': '2022-11-28',
+      ...(opciones.body ? { 'Content-Type': 'application/json' } : {}),
+    },
+  });
+  if (!r.ok) throw new Error(`GitHub respondió ${r.status} en ${ruta}`);
+  return r.status === 204 ? null : r.json();
+}
+
+/// Lanza los robots en vivo que no estén corriendo ni en cola. Devuelve los que lanzó.
+async function revisarRobotsEnVivo() {
+  if (!process.env.GH_TOKEN || !process.env.GITHUB_REPOSITORY || !enHorarioEnVivo()) return [];
+  const lanzados = [];
+  for (const wf of ROBOTS_EN_VIVO) {
+    const { workflow_runs: corridas = [] } = await github(`/actions/workflows/${wf}/runs?per_page=30`);
+    if (corridas.some((c) => c.status !== 'completed')) continue;
+    await github(`/actions/workflows/${wf}/dispatches`, { method: 'POST', body: JSON.stringify({ ref: 'main' }) });
+    lanzados.push(wf);
+  }
+  return lanzados;
+}
+
 async function vigilar({ minutos = 55, cadaMin = 2, escala = 1 } = {}) {
   const fin = Date.now() + minutos * 60000 * escala;
   let ultSgdc = (await db.doc('config/sgdc').get()).data()?.datosReporte ?? null;
@@ -502,6 +544,7 @@ async function vigilar({ minutos = 55, cadaMin = 2, escala = 1 } = {}) {
   let tickHecho = null; // hora en que ya se hizo la pasada de las :40
   let fallosSeguidos = 0;
   let fallo = false;
+  let revisoEnVivo = 0; // última revisión del patio y digiCAR en vivo
   console.log(`Vigilando los Power BI cada ${cadaMin} min (SGDC: ${ultSgdc ?? '—'}).`);
   while (Date.now() < fin) {
     const t0 = Date.now();
@@ -546,6 +589,15 @@ async function vigilar({ minutos = 55, cadaMin = 2, escala = 1 } = {}) {
           horaSync = Date.now();
         }
         hizo.push('pasada de las :40 (SGDC y taller completos)');
+      }
+    }
+    if (Date.now() - revisoEnVivo >= 4 * 60000 * escala) {
+      revisoEnVivo = Date.now();
+      try {
+        const l = await revisarRobotsEnVivo();
+        if (l.length) hizo.push(`lanzó ${l.join(' y ')} (no estaba corriendo)`);
+      } catch (e) {
+        console.warn(`[${h.texto}] No se pudo revisar el patio/digiCAR en vivo:`, e.message);
       }
     }
     console.log(`[${h.texto}] ${hizo.length ? hizo.join(' · ') : 'sin datos nuevos'}`);

@@ -1,7 +1,9 @@
 # digiCAR en vivo: SoC y posición de los buses en Firestore, casi en tiempo real.
 # En horario de turno (08:15–18:15 y 21:45–07:45, hora de Chile) cada corrida lee digiCAR cada 60 s
 # durante ~55 min (cada bus manda dato nuevo ~1 vez por minuto) y encadena la siguiente.
-# Fuera de turno, si se pide a mano ("Actualizar SOC"), hace una sola pasada como antes.
+# Fuera de turno, si se pide a mano ("Actualizar SOC"), hace una sola pasada como antes; si lo lanza
+# el botón "Iniciar turno" (turno=true), lee en vivo desde ya y encadena hasta la ventana.
+# Respaldo: el vigilante del SGDC (sgdc.yml) lo lanza si en horario no está corriendo.
 # Secretos: FIREBASE_SERVICE_ACCOUNT, DIGICAR_USUARIO y DIGICAR_CLAVE.
 # El estado en vivo de las pistolas (marquesinas) corre aparte: marquesinas.yml.
 name: Sincronizar digiCAR
@@ -10,6 +12,11 @@ on:
   schedule:
     - cron: '*/30 * * * *'
   workflow_dispatch:
+    inputs:
+      turno:
+        description: 'Lanzado al iniciar turno: en vivo aunque falte para el horario'
+        type: boolean
+        default: false
 
 # Una sola corriendo a la vez; la siguiente espera en cola (sin huecos ni dos a la vez).
 concurrency:
@@ -32,6 +39,10 @@ jobs:
           if { [ $hm -ge 815 ] && [ $hm -lt 1815 ]; } || [ $hm -ge 2145 ] || [ $hm -lt 745 ]; then
             echo "si=1" >> "$GITHUB_OUTPUT"
             echo "En turno ($hm): digiCAR en vivo."
+          elif [ "${{ inputs.turno }}" = "true" ]; then
+            echo "si=1" >> "$GITHUB_OUTPUT"
+            echo "antes=1" >> "$GITHUB_OUTPUT"
+            echo "Turno iniciado antes del horario ($hm): digiCAR en vivo desde ya."
           else
             echo "Fuera de turno ($hm): solo si se pidió a mano, una pasada."
           fi
@@ -52,7 +63,7 @@ jobs:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
           DIGICAR_USUARIO: ${{ secrets.DIGICAR_USUARIO }}
           DIGICAR_CLAVE: ${{ secrets.DIGICAR_CLAVE }}
-        run: node digicar_sync.mjs --loop --cada 60
+        run: node digicar_sync.mjs --loop --cada 60 ${{ steps.horario.outputs.antes == '1' && '--siempre' || '' }}
       - name: Traer SoC una vez (fuera de turno, pedido a mano)
         if: steps.horario.outputs.si != '1' && github.event_name == 'workflow_dispatch'
         working-directory: tools
@@ -72,6 +83,9 @@ jobs:
           if { [ $hm -ge 815 ] && [ $hm -lt 1815 ]; } || [ $hm -ge 2145 ] || [ $hm -lt 745 ]; then
             gh workflow run digicar.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"
             echo "Sigue el turno ($hm): se pidió la corrida siguiente."
+          elif [ "${{ steps.horario.outputs.antes }}" = "1" ]; then
+            gh workflow run digicar.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f turno=true
+            echo "Turno iniciado, aún antes del horario ($hm): se pidió la siguiente."
           else
             echo "Terminó el turno ($hm): no se encadena."
           fi
