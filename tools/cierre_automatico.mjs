@@ -66,10 +66,11 @@ function turnoAnterior(ahora) {
   return { turno: 'PM', dia: ayer };
 }
 
+/// ¿Hay un cierre vigente (no anulado por el admin) de ese turno?
 async function yaCerrado(db, turno, dia) {
   const s = await db.collection('turnos')
-    .where('dia', '==', conGuiones(dia)).where('turno', '==', turno).limit(1).get();
-  return !s.empty;
+    .where('dia', '==', conGuiones(dia)).where('turno', '==', turno).get();
+  return s.docs.some((d) => d.data().anulado !== true);
 }
 
 /// Aviso para el admin (sale en ERRORES, con el contador). Uno por turno.
@@ -114,13 +115,19 @@ export async function cierreAutomatico(db, cargas, datosSgdc) {
   const v = CIERRE[turno];
   const [desde, hasta] = ventana(turno, dia);
 
-  if (manual.manual) {
-    if (ahora < hasta) {
-      console.log(`Cierre automático: el turno ${nombre(turno)} del ${corta(dia)} sigue en curso.`);
-      return;
-    }
-  } else if (await yaCerrado(db, turno, dia)) {
+  if (manual.manual && ahora < hasta) {
+    console.log(`Cierre automático: el turno ${nombre(turno)} del ${corta(dia)} sigue en curso.`);
+    return;
+  }
+  // Nunca se guarda un segundo cierre del mismo turno.
+  if (await yaCerrado(db, turno, dia)) {
     console.log(`Cierre automático: el turno ${nombre(turno)} del ${corta(dia)} ya está cerrado.`);
+    if (manual.manual) {
+      // Lo iniciaron de nuevo después de cerrarlo: que lo cierre una persona (el admin puede reemplazar).
+      await avisar(db, `${id}_duplicado`,
+        `El turno ${nombre(turno)} del ${corta(dia)} sigue iniciado pero ya tenía un cierre. El robot no guarda ` +
+        `otro. Ciérralo desde CERRAR TURNO (el admin puede reemplazar el anterior).`);
+    }
     return;
   }
   // Fuera del hueco entre turnos no se cierra (borraría lo del equipo que ya entró): solo se avisa.

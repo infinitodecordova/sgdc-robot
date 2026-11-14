@@ -61,9 +61,10 @@ async function adminEnTurno(db, ahora) {
 /// último "Cerrar turno" de ESE MISMO turno, o del último "Limpiar semáforo", lo que sea más nuevo.
 /// El cierre de OTRO turno no corta nada (si el diurno se cierra a las 20:40, las cargas del
 /// nocturno de 20:00–20:40 siguen valiendo). Devuelve null si no hay corte.
+/// Los turnos anulados por el admin (anulado: true) no cuentan.
 export async function ultimoCierre(db, turno) {
-  const s = await db.collection('turnos').orderBy('cerradoEn', 'desc').limit(1).get();
-  const t = s.docs[0]?.data();
+  const s = await db.collection('turnos').orderBy('cerradoEn', 'desc').limit(10).get();
+  const t = s.docs.map((d) => d.data()).find((x) => x.anulado !== true);
   const clave = t ? `${String(t.dia ?? '').replace(/-/g, '')}_${t.turno}` : null;
   const cierre = t && (!turno || clave === turno) ? t.cerradoEn?.toDate?.() ?? null : null;
   const limpieza = (await db.doc('config/limpieza').get()).data()?.fecha?.toDate?.() ?? null;
