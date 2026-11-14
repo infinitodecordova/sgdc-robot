@@ -236,8 +236,12 @@ async function consultarDigicar(token, ids = null) {
     if (r.status === 401) {
       throw Object.assign(new Error('digiCAR respondió 401: el token de digiCAR venció o lo anularon'), { status: 401 });
     }
-    if (r.status === 403) throw new Error('digiCAR respondió 403: el token de digiCAR no tiene permiso para ver los buses');
-    if (!r.ok) throw new Error(`digiCAR respondió ${r.status}: ${(await r.text()).slice(0, 300)}`);
+    if (r.status === 403) {
+      throw Object.assign(new Error('digiCAR respondió 403: el token de digiCAR no tiene permiso para ver los buses'), { status: 403 });
+    }
+    if (!r.ok) {
+      throw Object.assign(new Error(`digiCAR respondió ${r.status}: ${(await r.text()).slice(0, 300)}`), { status: r.status });
+    }
     const j = await r.json();
     for (const d of j.data ?? []) {
       const f = d.latest?.ENTITY_FIELD ?? {};
@@ -607,8 +611,9 @@ export async function correrDigicarEnVivo({
         if (e.status === 401) {
           token = null;
           e.vencido = true;
-        } else if (ids) {
-          console.log(`[${horaChile()}] digiCAR: falló la consulta solo de nuestros buses; vuelvo a la completa.`);
+        } else if (ids && e.status) {
+          // digiCAR respondió con error: puede que no acepte la lista. Una falla de red no cuenta.
+          console.log(`[${horaChile()}] digiCAR: falló la consulta solo de nuestros buses (${e.status}); vuelvo a la completa.`);
           ids = null;
         }
         throw e;
