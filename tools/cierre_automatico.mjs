@@ -49,7 +49,7 @@ const corta = (dia) => `${+dia.slice(6, 8)}/${+dia.slice(4, 6)}`;
 const hora = (d) => d.toLocaleString('es-CL', { timeZone: 'America/Santiago', dateStyle: 'short', timeStyle: 'short' });
 
 /// Ventana [desde, hasta) del turno: diurno 07:30–20:00, nocturno 20:00–07:30 del día siguiente.
-function ventana(turno, dia) {
+export function ventana(turno, dia) {
   const [y, m, d] = partes(dia);
   if (turno === 'AM') return [fechaChile(y, m, d, 7, 30), fechaChile(y, m, d, 20, 0)];
   const sig = chile(new Date(fechaChile(y, m, d, 12, 0).getTime() + 24 * 3600 * 1000)).dia;

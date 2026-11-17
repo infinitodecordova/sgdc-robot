@@ -433,7 +433,22 @@ async function pasada({ hacerSgdc, hacerTaller, probar = false }) {
   // Corrección automática del turno en curso (si el admin la dejó activada). Va DESPUÉS del cierre:
   // así el cierre no se lleva a su foto cargas del turno nuevo, ni las borra al limpiar.
   if (sgdc && !probar) fallo = (await corregir(sgdc)) || fallo;
+  // Revisión de los turnos ya cerrados contra el SGDC (solo avisa; va al final, con todo ya corregido).
+  if (sgdc && !probar) fallo = (await revisar(sgdc)) || fallo;
   return { fallo, sgdc };
+}
+
+/// Revisión de turnos cerrados con las cargas ya traídas. Devuelve true si falló.
+async function revisar(sgdc) {
+  try {
+    const { revisarTurnos } = await import('./revision_turnos.mjs');
+    await revisarTurnos(db, sgdc.cargas, sgdc.datos);
+    return false;
+  } catch (e) {
+    console.error('Falló la revisión de turnos:', e.message);
+    await anotarError(e, 'robot SGDC').catch(() => {});
+    return true;
+  }
 }
 
 /// Corrección automática con las cargas ya traídas. Devuelve true si falló.

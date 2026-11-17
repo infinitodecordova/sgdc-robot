@@ -1,0 +1,169 @@
+// Revisión de los turnos cerrados contra el SGDC (corre con el robot del SGDC, después del cierre
+// automático y la corrección).
+//
+// Cuando el Power BI del SGDC ya cubre el final de un turno cerrado (por una persona o por el robot),
+// compara la foto del turno con las cargas del SGDC de esa ventana y avisa al admin en ERRORES si:
+//   1. Un bus quedó anotado como cargado (pistola o % que sube) y el SGDC no tiene ninguna carga suya.
+//   2. Un bus quedó "BUS NO INGRESADO A CARGA" (NI) pero con pistola o % que sube.
+//   3. El SGDC tiene una carga de un bus que en el turno no quedó anotada (sin pistola ni % final).
+//   4. El SGDC tiene una carga de un bus que no está en la foto del turno ni en otros terminales.
+// Cada turno se revisa una sola vez (candado en privado/revision_<id del turno>).
+// No cambia nada del turno: solo avisa. Lecturas: ~3 turnos + ~3 candados por pasada y, una vez por
+// turno, sus cargas del SGDC (~40–80).
+
+import { Timestamp, FieldValue } from 'firebase-admin/firestore';
+import { chile } from './auto_correccion.mjs';
+import { ventana } from './cierre_automatico.mjs';
+
+// El SGDC tiene que llegar al menos hasta 20 min después del fin del turno (cargas que terminan tarde).
+const MARGEN_FIN_MIN = 20;
+// Solo turnos cerrados en las últimas 36 h (después de eso ya no se espera más al SGDC).
+const VENTANA_H = 36;
+const SUBE = 2; // puntos: % final que supera al inicial en más que esto = se anotó como cargado
+const PISTOLAS = new Set([
+  'B7-L', 'B7-R', 'B8-L', 'B8-R', 'B9-L', 'B9-R', 'B10-L', 'B10-R', 'B11-L', 'B11-R',
+  'B12-L', 'B12-R', 'B13-L', 'B13-R', 'A1-L', 'A1-R', 'A2-L', 'A2-R', 'A3-L', 'A3-R',
+  'A4-L', 'A4-R', 'A5-L', 'A5-R', 'A6-L', 'A6-R',
+]);
+
+const norma = (p) => String(p ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+const aFecha = (x) => x?.toDate?.() ?? x ?? null;
+const nombre = (t) => (t === 'PM' ? 'nocturno' : 'diurno');
+const hm = (d) => {
+  const h = chile(d).hm;
+  return `${String(Math.floor(h / 100)).padStart(2, '0')}:${String(h % 100).padStart(2, '0')}`;
+};
+const pct = (a, b) => `${a ?? '—'}→${b ?? '—'}`;
+
+/// Problemas de un turno (lista de textos). Exportada para probarla sin Firestore.
+export function problemasTurno(t, cargas) {
+  const porBus = new Map();
+  for (const c of cargas) {
+    const p = norma(c.ppu);
+    if (!porBus.has(p)) porBus.set(p, []);
+    porBus.get(p).push(c);
+  }
+  for (const l of porBus.values()) l.sort((x, y) => (x.inicio ?? x.reserva ?? 0) - (y.inicio ?? y.reserva ?? 0));
+
+  const out = [];
+  const enFoto = new Set();
+  for (const b of t.buses ?? []) {
+    const ppu = norma(b.ppu ?? b.id);
+    enFoto.add(ppu);
+    const l = porBus.get(ppu) ?? [];
+    const conPistola = PISTOLAS.has(b.coordenada);
+    const sube = b.pctInicial != null && b.pctFinal != null && b.pctFinal > b.pctInicial + SUBE;
+    const anotadoCargado = conPistola || sube;
+    const como = `${conPistola ? `${b.coordenada}, ` : ''}${pct(b.pctInicial, b.pctFinal)}`;
+    if (anotadoCargado && !l.length) {
+      out.push(`${ppu}: anotado como cargado (${como}) y el SGDC no tiene ninguna carga suya en el turno.`);
+    }
+    if (b.jornada === 'NI' && anotadoCargado) {
+      out.push(`${ppu}: marcado NI (no ingresado a carga) pero tiene ${como}.`);
+    }
+    if (l.length && !conPistola && b.pctFinal == null && b.jornada !== 'NI') {
+      const u = l[l.length - 1];
+      const f = aFecha(u.inicio ?? u.reserva);
+      out.push(`${ppu}: el SGDC tiene carga (${u.pistola ?? '—'}, ${pct(l[0].socInicio, u.socFin)}` +
+        `${f ? `, ${hm(f)}` : ''}) y en el turno no quedó anotada.`);
+    }
+  }
+  const externos = new Set((t.externos ?? []).map((e) => norma(e.ppu ?? e.id)));
+  for (const [ppu, l] of porBus) {
+    if (enFoto.has(ppu) || externos.has(ppu)) continue;
+    const u = l[l.length - 1];
+    const f = aFecha(u.inicio ?? u.reserva);
+    out.push(`${ppu}: cargó en el terminal según el SGDC (${u.pistola ?? '—'}${f ? `, ${hm(f)}` : ''}) ` +
+      'y no está en el turno ni en otros terminales.');
+  }
+  return out;
+}
+
+/**
+ * @param db Firestore
+ * @param cargas cargas del SGDC de esta pasada (inicio/reserva/fin como Date)
+ * @param datosSgdc Date de los datos del Power BI del SGDC
+ * @param probar true = solo muestra, no escribe
+ */
+export async function revisarTurnos(db, cargas, datosSgdc, { probar = false, desdeH = VENTANA_H } = {}) {
+  if (!datosSgdc) return;
+  const ahora = new Date();
+  const s = await db.collection('turnos')
+    .where('cerradoEn', '>=', Timestamp.fromDate(new Date(ahora.getTime() - desdeH * 3600 * 1000))).get();
+  for (const d of s.docs) {
+    const t = d.data();
+    if (t.anulado === true || !t.dia || !['AM', 'PM'].includes(t.turno)) continue;
+    const dia = t.dia.replace(/-/g, '');
+    const [desde, hasta] = ventana(t.turno, dia);
+    const titulo = `${nombre(t.turno)} del ${+dia.slice(6, 8)}/${+dia.slice(4, 6)}`;
+    if (datosSgdc.getTime() < hasta.getTime() + MARGEN_FIN_MIN * 60000) {
+      console.log(`Revisión de turnos: el ${titulo} espera al SGDC (datos ${hm(datosSgdc)}).`);
+      continue;
+    }
+    const candado = db.collection('privado').doc(`revision_${d.id}`);
+    if (!probar && (await candado.get()).exists) continue;
+
+    // Cargas de la ventana: las guardadas por el robot + las de esta pasada.
+    const todas = new Map();
+    const g = await db.collection('sgdc')
+      .where('inicio', '>=', Timestamp.fromDate(desde)).where('inicio', '<', Timestamp.fromDate(hasta)).get();
+    for (const x of g.docs) {
+      const c = x.data();
+      todas.set(x.id, { ...c, inicio: aFecha(c.inicio), reserva: aFecha(c.reserva), fin: aFecha(c.fin) });
+    }
+    for (const c of cargas ?? []) todas.set(String(c.id).replace(/\//g, '_'), c);
+    const delTurno = [...todas.values()].filter((c) => {
+      const f = c.inicio ?? c.reserva;
+      const terminal = String(c.terminal ?? 'Camilo Henriquez');
+      return f && f >= desde && f < hasta && /camilo/i.test(terminal);
+    });
+
+    const problemas = problemasTurno(t, delTurno);
+    console.log(`Revisión de turnos: ${titulo} (cerró ${t.cerradoPorNombre ?? '—'}) · ` +
+      `${delTurno.length} cargas SGDC · ${problemas.length ? `${problemas.length} a revisar` : 'todo cuadra'}.`);
+    for (const p of problemas) console.log('   ', p);
+    if (probar) continue;
+
+    // El candado primero: si otra corrida ya lo revisó, no se repite el aviso.
+    try {
+      await candado.create({ fecha: FieldValue.serverTimestamp(), turno: d.id, problemas: problemas.length });
+    } catch (e) {
+      if (e.code === 6 || /already exists/i.test(e.message)) continue;
+      throw e;
+    }
+    if (!problemas.length) continue;
+    await db.collection('errores').doc(`revision_${dia}_${t.turno}`).set({
+      origen: 'revisión de turno',
+      donde: 'GitHub Actions · sgdc-robot',
+      mensaje: `Turno ${titulo} (cerró ${t.cerradoPorNombre ?? '—'}): ${problemas.length} ` +
+        `${problemas.length === 1 ? 'bus no cuadra' : 'buses no cuadran'} con el SGDC. ` +
+        'Revísalo en HISTORIAL DE TURNOS y pregunta a quien lo anotó.\n' +
+        problemas.map((p) => `• ${p}`).join('\n'),
+      stack: '',
+      plataforma: 'GitHub',
+      ultima: FieldValue.serverTimestamp(),
+      ultimoUsuario: 'robot',
+      usuarios: FieldValue.arrayUnion('robot'),
+      veces: FieldValue.increment(1),
+      resuelto: false,
+    }, { merge: true });
+    console.log(`Aviso al admin: turno ${titulo}, ${problemas.length} a revisar.`);
+  }
+}
+
+// Prueba local (solo lee, no escribe nada):
+//   node tools/revision_turnos.mjs --probar [--horas 96] [tools/serviceAccount.json]
+if (process.argv[1]?.endsWith('revision_turnos.mjs')) {
+  const args = process.argv.slice(2);
+  if (!args.includes('--probar')) {
+    console.log('Solo se corre a mano con --probar (en el robot va dentro de sgdc_sync.mjs).');
+    process.exit(1);
+  }
+  const i = args.indexOf('--horas');
+  const horas = i >= 0 ? Number(args[i + 1]) : VENTANA_H;
+  const llave = args.find((a) => a.endsWith('.json')) ?? new URL('./serviceAccount.json', import.meta.url).pathname;
+  const { readFileSync } = await import('node:fs');
+  const { default: admin } = await import('firebase-admin');
+  admin.initializeApp({ credential: admin.credential.cert(JSON.parse(readFileSync(llave, 'utf8'))) });
+  await revisarTurnos(admin.firestore(), [], new Date(), { probar: true, desdeH: horas });
+}
