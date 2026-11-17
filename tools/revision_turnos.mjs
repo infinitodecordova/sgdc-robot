@@ -7,6 +7,8 @@
 //   2. Un bus quedó "BUS NO INGRESADO A CARGA" (NI) pero con pistola o % que sube.
 //   3. El SGDC tiene una carga de un bus que en el turno no quedó anotada (sin pistola ni % final).
 //   4. El SGDC tiene una carga de un bus que no está en la foto del turno ni en otros terminales.
+//   5. El SGDC tiene un bus cargando en dos pistolas a la vez (patente mal digitada en el cargador). Si en
+//      esa pistola hay un bus anotado sin carga a su nombre, se dice que la carga es probablemente suya.
 // Cada turno se revisa una sola vez (candado en privado/revision_<id del turno>).
 // No cambia nada del turno: solo avisa. Lecturas: ~3 turnos + ~3 candados por pasada y, una vez por
 // turno, sus cargas del SGDC (~40–80).
@@ -34,6 +36,9 @@ const hm = (d) => {
   return `${String(Math.floor(h / 100)).padStart(2, '0')}:${String(h % 100).padStart(2, '0')}`;
 };
 const pct = (a, b) => `${a ?? '—'}→${b ?? '—'}`;
+// Fin de una carga: el del SGDC, o inicio + minutos, o (en proceso, sin datos) inicio + 3 h.
+const finDe = (c) => aFecha(c.fin) ??
+  new Date(c.inicio.getTime() + (c.minutos ? c.minutos * 60000 : 3 * 3600 * 1000));
 
 /// Problemas de un turno (lista de textos). Exportada para probarla sin Firestore.
 export function problemasTurno(t, cargas) {
@@ -44,6 +49,25 @@ export function problemasTurno(t, cargas) {
     porBus.get(p).push(c);
   }
   for (const l of porBus.values()) l.sort((x, y) => (x.inicio ?? x.reserva ?? 0) - (y.inicio ?? y.reserva ?? 0));
+
+  // Un bus no puede cargar en dos pistolas a la vez: si el SGDC lo tiene así, una de esas cargas es de
+  // otro bus (patente mal digitada en el cargador).
+  const dobles = []; // { ppu, c (la carga), otra (la que se le cruza) }
+  for (const [ppu, l] of porBus) {
+    for (let i = 0; i < l.length; i++) {
+      for (let j = i + 1; j < l.length; j++) {
+        const a = l[i];
+        const b = l[j];
+        if (!a.inicio || !b.inicio || a.pistola === b.pistola) continue;
+        // Carga cortada (quedó "En proceso", sus datos no son confiables) y seguida en otra pistola: no es doble.
+        if (a.estado !== 'Finalizada') continue;
+        if (b.inicio < finDe(a)) {
+          dobles.push({ ppu, c: a, otra: b }, { ppu, c: b, otra: a });
+        }
+      }
+    }
+  }
+  const explicadas = new Set(); // cargas dobles que calzan con un bus anotado sin carga
 
   const out = [];
   const enFoto = new Set();
@@ -56,6 +80,17 @@ export function problemasTurno(t, cargas) {
     const anotadoCargado = conPistola || sube;
     const como = `${conPistola ? `${b.coordenada}, ` : ''}${pct(b.pctInicial, b.pctFinal)}`;
     if (anotadoCargado && !l.length) {
+      // ¿Hay una carga doble en su misma pistola? Esa es probablemente la suya.
+      const d = conPistola && dobles.find((x) => x.c.pistola === b.coordenada && !explicadas.has(x.c));
+      if (d) {
+        explicadas.add(d.c);
+        explicadas.add(d.otra);
+        out.push(`${ppu}: anotado como cargado (${como}) sin carga a su nombre. En el SGDC la carga de ` +
+          `${d.c.pistola} (${hm(d.c.inicio)}, ${pct(d.c.socInicio, d.c.socFin)}) está a nombre de ${d.ppu}, ` +
+          `que a esa hora también cargaba en ${d.otra.pistola}: probablemente es de ${ppu} y la patente se ` +
+          'digitó mal en el cargador. Lo anotado está bien; el error es del SGDC.');
+        continue;
+      }
       out.push(`${ppu}: anotado como cargado (${como}) y el SGDC no tiene ninguna carga suya en el turno.`);
     }
     if (b.jornada === 'NI' && anotadoCargado) {
@@ -68,6 +103,16 @@ export function problemasTurno(t, cargas) {
         `${f ? `, ${hm(f)}` : ''}) y en el turno no quedó anotada.`);
     }
   }
+  // Cargas dobles que ningún bus anotado explica: igual se avisan (una es de otro bus).
+  const avisadas = new Set();
+  for (const { ppu, c, otra } of dobles) {
+    if (explicadas.has(c) || explicadas.has(otra) || avisadas.has(c)) continue;
+    avisadas.add(c);
+    avisadas.add(otra);
+    out.push(`${ppu}: el SGDC lo tiene cargando en dos pistolas a la vez (${c.pistola} ${hm(c.inicio)} y ` +
+      `${otra.pistola} ${hm(otra.inicio)}). Una de esas cargas es de otro bus (patente mal digitada).`);
+  }
+
   const externos = new Set((t.externos ?? []).map((e) => norma(e.ppu ?? e.id)));
   for (const [ppu, l] of porBus) {
     if (enFoto.has(ppu) || externos.has(ppu)) continue;
