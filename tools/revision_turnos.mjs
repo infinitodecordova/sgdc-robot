@@ -41,7 +41,9 @@ const finDe = (c) => aFecha(c.fin) ??
   new Date(c.inicio.getTime() + (c.minutos ? c.minutos * 60000 : 3 * 3600 * 1000));
 
 /// Problemas de un turno (lista de textos). Exportada para probarla sin Firestore.
-export function problemasTurno(t, cargas) {
+/// [sugerencias]: se le agregan las patentes mal digitadas que la app puede corregir con un toque
+/// ({ pistola, de, a, inicio, kwh, soh, socInicio, socFin }).
+export function problemasTurno(t, cargas, sugerencias = []) {
   const porBus = new Map();
   for (const c of cargas) {
     const p = norma(c.ppu);
@@ -85,6 +87,10 @@ export function problemasTurno(t, cargas) {
       if (d) {
         explicadas.add(d.c);
         explicadas.add(d.otra);
+        sugerencias.push({
+          pistola: d.c.pistola, de: d.ppu, a: ppu, inicio: d.c.inicio.toISOString(),
+          kwh: d.c.kwh ?? null, soh: d.c.soh ?? null, socInicio: d.c.socInicio ?? null, socFin: d.c.socFin ?? null,
+        });
         out.push(`${ppu}: anotado como cargado (${como}) sin carga a su nombre. En el SGDC la carga de ` +
           `${d.c.pistola} (${hm(d.c.inicio)}, ${pct(d.c.socInicio, d.c.socFin)}) está a nombre de ${d.ppu}, ` +
           `que a esa hora también cargaba en ${d.otra.pistola}: probablemente es de ${ppu} y la patente se ` +
@@ -163,10 +169,12 @@ export async function revisarTurnos(db, cargas, datosSgdc, { probar = false, des
       return f && f >= desde && f < hasta && /camilo/i.test(terminal);
     });
 
-    const problemas = problemasTurno(t, delTurno);
+    const sugerencias = [];
+    const problemas = problemasTurno(t, delTurno, sugerencias);
     console.log(`Revisión de turnos: ${titulo} (cerró ${t.cerradoPorNombre ?? '—'}) · ` +
       `${delTurno.length} cargas SGDC · ${problemas.length ? `${problemas.length} a revisar` : 'todo cuadra'}.`);
     for (const p of problemas) console.log('   ', p);
+    for (const x of sugerencias) console.log(`    sugerencia: carga de ${x.pistola} ${x.de} → ${x.a} (${x.kwh ?? '—'} kWh)`);
     if (probar) continue;
 
     // El candado primero: si otra corrida ya lo revisó, no se repite el aviso.
@@ -191,6 +199,9 @@ export async function revisarTurnos(db, cargas, datosSgdc, { probar = false, des
       usuarios: FieldValue.arrayUnion('robot'),
       veces: FieldValue.increment(1),
       resuelto: false,
+      // Para el botón "Asignar esta carga a …" de la app (corrige la foto del turno).
+      turnoId: d.id,
+      sugerencias,
     }, { merge: true });
     console.log(`Aviso al admin: turno ${titulo}, ${problemas.length} a revisar.`);
   }
