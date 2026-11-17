@@ -166,18 +166,24 @@ function desdeFirestore(buses) {
     r[ppu] = {
       ...b,
       desde: aMs(b.desde),
-      ref: b.ref && aMs(b.ref.t) != null ? { soc: b.ref.soc, t: aMs(b.ref.t) } : null,
+      ref: b.ref && aMs(b.ref.t) != null ? { soc: b.ref.soc, t: aMs(b.ref.t), comp: b.ref.comp ?? null } : null,
     };
   }
   return r;
 }
 
+/// Pistola compañera del mismo cargador (comparten la potencia): B7-L ↔ B7-R.
+export const companera = (p) => (p?.endsWith('-L') ? `${p.slice(0, -1)}R` : p?.endsWith('-R') ? `${p.slice(0, -1)}L` : null);
+
 /// Completa cada bus con "desde", "ref" y "ritmo" comparando con la lectura anterior ([antes]).
 /// Devuelve las muestras para la curva de carga: [tramo de 5 %, minutos, % subidos].
 /// El ritmo se mide contra una referencia de hace ≥ 4 min, así que leer más seguido no da más muestras.
-function completar(buses, antes, ahoraMs, escala = 1) {
+export function completar(buses, antes, ahoraMs, escala = 1) {
   const muestras = [];
+  // Cargador compartido: la compañera también está cargando (cada una carga ~1,6 veces más lento).
+  const cargandoEn = new Set(Object.values(buses).filter((x) => x.estado === 'cargando').map((x) => x.pistola));
   for (const [ppu, b] of Object.entries(buses)) {
+    const comp = cargandoEn.has(companera(b.pistola));
     const a = antes[ppu];
     const igual = a && a.pistola === b.pistola && a.estado === b.estado;
     // "desde": cuándo quedó el bus en ese estado y pistola (para avisar si lleva rato reservado sin cargar).
@@ -190,34 +196,47 @@ function completar(buses, antes, ahoraMs, escala = 1) {
       if (ref && min >= 4 && min <= 15) {
         const sube = b.soc - ref.soc;
         if (sube >= 0 && sube <= 25) {
+          // Solo o compartido si estuvo igual al principio y al final del tramo; si cambió, va solo a la
+          // curva general (null).
+          const tipo = ref.comp == null || ref.comp !== comp ? null : comp ? 'compartido' : 'solo';
           b.ritmo = Math.round((sube / min) * 1000) / 1000;
           b.ritmoSoc = Math.round((ref.soc + b.soc) / 2);
-          muestras.push([Math.min(95, Math.floor(((ref.soc + b.soc) / 2) / 5) * 5), min, sube]);
+          b.ritmoComp = tipo == null ? null : comp;
+          muestras.push([Math.min(95, Math.floor(((ref.soc + b.soc) / 2) / 5) * 5), min, sube, tipo]);
         }
-        b.ref = { soc: b.soc, t: ahoraMs };
+        b.ref = { soc: b.soc, t: ahoraMs, comp };
       } else if (ref && min < 4) {
         b.ref = ref;
       } else {
-        b.ref = { soc: b.soc, t: ahoraMs };
+        b.ref = { soc: b.soc, t: ahoraMs, comp };
       }
     }
     if (b.ritmo == null && igual && a.ritmo != null) {
       b.ritmo = a.ritmo;
       b.ritmoSoc = a.ritmoSoc ?? null;
+      b.ritmoComp = a.ritmoComp ?? null;
     }
   }
   return muestras;
 }
 
 /// Suma muestras a la curva (los datos viejos pesan menos), igual que antes.
-function sumarCurva(curva, muestras) {
-  for (const [t, min, pct] of muestras) {
-    const c = curva[t] ?? { min: 0, pct: 0, n: 0 };
-    curva[t] = {
+/// [curva] = { tramos, tramosSolo, tramosCompartido }: todas van a "tramos" (general, como antes) y,
+/// si se sabe, también a la del cargador solo o compartido.
+export function sumarCurva(curva, muestras) {
+  const sumar = (tramos, t, min, pct) => {
+    const c = tramos[t] ?? { min: 0, pct: 0, n: 0 };
+    tramos[t] = {
       min: Math.round((c.min * 0.98 + min) * 100) / 100,
       pct: Math.round((c.pct * 0.98 + pct) * 100) / 100,
       n: (c.n ?? 0) + 1,
     };
+  };
+  for (const k of ['tramos', 'tramosSolo', 'tramosCompartido']) curva[k] ??= {};
+  for (const [t, min, pct, tipo] of muestras) {
+    sumar(curva.tramos, t, min, pct);
+    if (tipo === 'solo') sumar(curva.tramosSolo, t, min, pct);
+    if (tipo === 'compartido') sumar(curva.tramosCompartido, t, min, pct);
   }
 }
 
@@ -229,7 +248,7 @@ function paraFirestore(buses, Timestamp) {
     r[ppu] = {
       ...resto,
       desde: Timestamp.fromMillis(desde),
-      ...(ref ? { ref: { soc: ref.soc, t: Timestamp.fromMillis(ref.t) } } : {}),
+      ...(ref ? { ref: { soc: ref.soc, t: Timestamp.fromMillis(ref.t), comp: ref.comp ?? null } } : {}),
     };
   }
   return r;
@@ -359,9 +378,12 @@ export async function correrMarquesinas({
 
   const guardarCurva = async (motivo) => {
     if (!escribe || !muestrasPendientes.length) return;
-    if (!curva) curva = (await refCurva.get()).data()?.tramos ?? {};
+    if (!curva) {
+      const d = (await refCurva.get()).data() ?? {};
+      curva = { tramos: d.tramos ?? {}, tramosSolo: d.tramosSolo ?? {}, tramosCompartido: d.tramosCompartido ?? {} };
+    }
     sumarCurva(curva, muestrasPendientes);
-    await refCurva.set({ tramos: curva, actualizado: FS.FieldValue.serverTimestamp() });
+    await refCurva.set({ ...curva, actualizado: FS.FieldValue.serverTimestamp() });
     console.log(`Marquesinas: curva de carga actualizada con ${muestrasPendientes.length} mediciones (${motivo}).`);
     muestrasPendientes = [];
     ultimaCurva = Date.now();
