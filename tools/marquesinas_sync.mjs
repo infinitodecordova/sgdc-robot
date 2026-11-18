@@ -32,6 +32,8 @@ const ESCRITURA_CONTROL_MS = 5 * 60 * 1000; // aunque no cambie nada, para que l
 const TOPE_ESCRITURAS = 150; // por corrida
 const ESCRITURA_TOPE_MS = 2 * 60 * 1000; // pasado el tope
 const CURVA_MS = 10 * 60 * 1000; // las muestras de la curva de carga se guardan juntas cada 10 min
+// No se mide un tramo que suba más rápido de lo posible (salto de lectura).
+const RITMO_MAX = 1.5; // % por minuto (lo real es ~0,65 solo, máximo ~0,9)
 const MAX_FALLOS_LOGIN = 3;
 const MAX_FALLOS_LECTURA = 10;
 
@@ -70,7 +72,8 @@ const num = (v) => {
   return Number.isFinite(n) ? n : null;
 };
 
-/// estado 3 = cargando; 6 = ya cargó y sigue conectado (Operativo en la página);
+/// estado 3 = cargando; 6 = ya cargó y sigue conectado (Operativo en la página); 7 = sincronizando
+/// (conectado, titila azul antes de cargar: queda como reservada);
 /// con bus asignado pero sin cargar = reservada; el resto según connectorStatus.
 /// Mismos estados y colores que la página: disponible (verde), reservado (amarillo),
 /// cargando (azul), ocupado (rojo), operativo (morado: ya cargó, desconectado y listo para ruta),
@@ -135,7 +138,10 @@ async function leerPistolas(token, crudo = []) {
         const dato = {
           estado: estadoDe(p),
           ppu: ppu || null,
-          soc: num(p.soc),
+          // Reservada (2) o sincronizando (7, titila azul al conectar): la página muestra un SoC que no es
+          // el del bus (100 % casi siempre) hasta que empieza a cargar. Sin SoC, la app usa el de digiCAR.
+          soc: p.estado === 2 || p.estado === 7 ? null : num(p.soc),
+          sincronizando: p.estado === 7,
           kwh: num(p.energiaCarga),
           tiempo: p.tiempoCarga ?? null, // "01:12" = horas:minutos cargando
           temperatura: num(p.temperatura),
@@ -195,7 +201,9 @@ export function completar(buses, antes, ahoraMs, escala = 1) {
       const min = ref ? (ahoraMs - ref.t) / (60000 * escala) : null;
       if (ref && min >= 4 && min <= 15) {
         const sube = b.soc - ref.soc;
-        if (sube >= 0 && sube <= 25) {
+        // Con el bus ya en 100 % al empezar el tramo no se mide: el patio puede seguir mostrando
+        // "cargando" después de que el SGDC dio la carga por terminada, y esos minutos inflaban el 95–100.
+        if (sube >= 0 && sube / min <= RITMO_MAX && ref.soc < 100) {
           // Solo o compartido si estuvo igual al principio y al final del tramo; si cambió, va solo a la
           // curva general (null).
           const tipo = ref.comp == null || ref.comp !== comp ? null : comp ? 'compartido' : 'solo';
