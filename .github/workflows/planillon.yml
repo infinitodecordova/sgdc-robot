@@ -1,0 +1,74 @@
+# Planillón de despacho ICR: a qué hora sale cada bus del semáforo y con qué conductor (planillon/hoy).
+# Cada corrida hace una pasada cada 3 min durante ~55 min o hasta que termine el horario
+# (05:00–00:30, hora de Chile; mismo horario que HORARIO en planillon_sync.mjs). Fuera de horario sale
+# al tiro sin leer nada.
+# Respaldo: el vigilante del SGDC (sgdc.yml) lo lanza si en horario no está corriendo.
+# Secretos: FIREBASE_SERVICE_ACCOUNT, ICR_USUARIO e ICR_CLAVE.
+# El repo es público: el log nunca muestra nombres de conductores (ni RUT, que ni se guarda).
+name: Planillón (despacho ICR)
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+# Una sola corriendo a la vez; la siguiente espera en cola.
+concurrency:
+  group: planillon
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write # para encadenar la corrida siguiente (paso final)
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: ¿Es horario? (hora de Chile)
+        id: horario
+        env:
+          HAY_CLAVE: ${{ secrets.ICR_USUARIO != '' && secrets.ICR_CLAVE != '' }}
+        run: |
+          hm=$((10#$(TZ=America/Santiago date +%H%M)))
+          if [ "$HAY_CLAVE" != "true" ]; then
+            echo "Faltan los secretos ICR_USUARIO / ICR_CLAVE: no se lee ni se encadena."
+          elif [ $hm -ge 500 ] || [ $hm -lt 30 ]; then
+            echo "si=1" >> "$GITHUB_OUTPUT"
+            echo "En horario ($hm): se lee el planillón."
+          else
+            echo "Fuera de horario ($hm): no se lee el planillón."
+          fi
+      - uses: actions/checkout@v5
+        if: steps.horario.outputs.si == '1'
+      - uses: actions/setup-node@v5
+        if: steps.horario.outputs.si == '1'
+        with:
+          node-version: 22
+      - name: Instalar
+        if: steps.horario.outputs.si == '1'
+        working-directory: tools
+        run: npm install --no-audit --no-fund
+      - name: Leer el planillón cada 3 min (~55 min)
+        if: steps.horario.outputs.si == '1'
+        working-directory: tools
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          ICR_USUARIO: ${{ secrets.ICR_USUARIO }}
+          ICR_CLAVE: ${{ secrets.ICR_CLAVE }}
+        run: node planillon_sync.mjs --loop --cada 180
+      # El cron de GitHub se atrasa o se salta pasadas: si sigue el horario, la corrida deja pedida
+      # la siguiente (queda en cola por la concurrencia). Solo si esta salió bien, para no encadenar fallas.
+      - name: Encadenar la siguiente corrida si sigue el horario
+        if: success() && steps.horario.outputs.si == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          hm=$((10#$(TZ=America/Santiago date +%H%M)))
+          if [ $hm -ge 500 ] || [ $hm -lt 30 ]; then
+            gh workflow run planillon.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"
+            echo "Sigue el horario ($hm): se pidió la corrida siguiente."
+          else
+            echo "Terminó el horario ($hm): no se encadena."
+          fi

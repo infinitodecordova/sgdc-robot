@@ -509,19 +509,34 @@ function horaChileAhora() {
 }
 
 // ------------------------------------------------------------ Respaldo: patio y digiCAR en vivo
-// El cron de GitHub se salta pasadas (el 13-11 el patio nocturno nunca arrancó). En horario de turno,
-// cada 4 min el vigilante pregunta a GitHub si marquesinas.yml y digicar.yml tienen una corrida
-// andando o en cola; si no, la lanza. No toca Firestore. Necesita GH_TOKEN y GITHUB_REPOSITORY.
-const ROBOTS_EN_VIVO = ['marquesinas.yml', 'digicar.yml'];
-
-/// Horario de turno de los robots en vivo: 08:15–18:15 y 21:45–07:45 (hora de Chile).
-function enHorarioEnVivo(d = new Date()) {
+// El cron de GitHub se salta pasadas (el 13-11 el patio nocturno nunca arrancó). Cada 4 min el
+// vigilante pregunta a GitHub si marquesinas.yml, digicar.yml y planillon.yml tienen una corrida
+// andando o en cola (cada uno en su horario); si no, la lanza. No toca Firestore.
+// Necesita GH_TOKEN y GITHUB_REPOSITORY.
+function hmChileAhora(d = new Date()) {
   const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/Santiago', hourCycle: 'h23', hour: '2-digit', minute: '2-digit',
   }).formatToParts(d).map((x) => [x.type, x.value]));
-  const hm = Number(p.hour) * 100 + Number(p.minute);
+  return Number(p.hour) * 100 + Number(p.minute);
+}
+
+/// Horario de turno de los robots en vivo: 08:15–18:15 y 21:45–07:45 (hora de Chile).
+function enHorarioEnVivo(d = new Date()) {
+  const hm = hmChileAhora(d);
   return (hm >= 815 && hm < 1815) || hm >= 2145 || hm < 745;
 }
+
+/// Horario del planillón: 05:00–00:30 (igual que HORARIO en planillon_sync.mjs y planillon.yml).
+function enHorarioPlanillon(d = new Date()) {
+  const hm = hmChileAhora(d);
+  return hm >= 500 || hm < 30;
+}
+
+const ROBOTS_EN_VIVO = [
+  ['marquesinas.yml', enHorarioEnVivo],
+  ['digicar.yml', enHorarioEnVivo],
+  ['planillon.yml', enHorarioPlanillon],
+];
 
 async function github(ruta, opciones = {}) {
   const r = await fetch(`https://api.github.com/repos/${process.env.GITHUB_REPOSITORY}${ruta}`, {
@@ -539,9 +554,10 @@ async function github(ruta, opciones = {}) {
 
 /// Lanza los robots en vivo que no estén corriendo ni en cola. Devuelve los que lanzó.
 async function revisarRobotsEnVivo() {
-  if (!process.env.GH_TOKEN || !process.env.GITHUB_REPOSITORY || !enHorarioEnVivo()) return [];
+  if (!process.env.GH_TOKEN || !process.env.GITHUB_REPOSITORY) return [];
   const lanzados = [];
-  for (const wf of ROBOTS_EN_VIVO) {
+  for (const [wf, enHorario] of ROBOTS_EN_VIVO) {
+    if (!enHorario()) continue;
     const { workflow_runs: corridas = [] } = await github(`/actions/workflows/${wf}/runs?per_page=30`);
     if (corridas.some((c) => c.status !== 'completed')) continue;
     await github(`/actions/workflows/${wf}/dispatches`, { method: 'POST', body: JSON.stringify({ ref: 'main' }) });
@@ -612,7 +628,7 @@ async function vigilar({ minutos = 55, cadaMin = 2, escala = 1 } = {}) {
         const l = await revisarRobotsEnVivo();
         if (l.length) hizo.push(`lanzó ${l.join(' y ')} (no estaba corriendo)`);
       } catch (e) {
-        console.warn(`[${h.texto}] No se pudo revisar el patio/digiCAR en vivo:`, e.message);
+        console.warn(`[${h.texto}] No se pudo revisar los robots en vivo (patio, digiCAR, planillón):`, e.message);
       }
     }
     console.log(`[${h.texto}] ${hizo.length ? hizo.join(' · ') : 'sin datos nuevos'}`);
