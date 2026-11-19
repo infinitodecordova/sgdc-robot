@@ -7,8 +7,10 @@
 // Modo loop (workflow planillon.yml): una pasada cada 3 min durante ~55 min o hasta que termine el
 // horario (HORARIO, hora de Chile). Fuera de horario sale al tiro.
 //   node planillon_sync.mjs --loop --cada 180
-// Cada pasada lee de los 4 servicios el bloque actual y el siguiente (y el anterior en los primeros
-// 15 min del bloque, para pillar horas reales anotadas tarde).
+// Cada pasada lee de los servicios de los dos sentidos (R: 1040-R, 1043-R y sus FTS, salen del terminal;
+// I: 1040-I, 1043-I y sus FTS, vienen del cabezal) el bloque actual y el siguiente (y el anterior en los
+// primeros 15 min del bloque). Sentido R va en buses.PPU con conductor; sentido I en buses.PPU.viene SIN
+// conductor (la salida real del cabezal sale de digiCAR → salioDe).
 // Escribe planillon/hoy SOLO si cambió algo, máximo 1 vez cada 3 min, más un control cada 15 min.
 // Al cambiar de día parte de cero (sin historial).
 // El ICR no anota la hora real y saca la salida cuando el bus sale (19-11): la hora real se toma de la
@@ -26,7 +28,8 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import readline from 'node:readline';
 import {
-  SERVICIOS, SesionIcr, bloqueDeAhora, diaChile, esErrorDeRed, fechaIcr, minutoChile,
+  CAMPO_SERVICIOS, SERVICIOS_I, SERVICIOS_R, SesionIcr, bloqueDeAhora, diaChile, esErrorDeRed, fechaIcr, minutoChile,
+  sentidoDe,
 } from './planillon_icr.mjs';
 
 /// Horario del robot (hora de Chile, minutos desde medianoche). Cruza la medianoche: 05:00 → 00:30.
@@ -40,6 +43,7 @@ const PENDIENTE_MIN = 30; // una salida sin hora real se da por perdida 30 min d
 const QUEDA_MIN = 15; // si el ICR saca una salida que ya tocaba (o falta menos que esto), se queda marcada "fuera"
 const GPS_ANTES_MIN = 30; // la salida del terminal de digiCAR cuenta desde 30 min antes de la hora de despacho…
 const GPS_DESPUES_MIN = 90; // …hasta 90 min después
+const EN_CAMINO_MIN = 75; // un viaje cabezal → terminal que salió hace menos de esto sigue "en camino" (~53 min medidos)
 const DIGICAR_MS = 3 * 60 * 1000 - 10000; // digicar/flota se lee máx. 1 vez cada ~3 min, y solo si hace falta
 const MAX_LOGIN_RECHAZADO = 3;
 const PAUSA_LOGIN_MS = 60 * 60 * 1000;
@@ -76,39 +80,58 @@ function ordenado(o) {
   return o;
 }
 
+const vence = (s) => aMin(s.despacho ?? s.hora); // hora en que debe salir
+
+/// Pendiente: sin hora real, el ICR todavía la muestra y no han pasado 30 min de su hora de despacho.
+const pendiente = (s, minuto) => !s.real && !s.fuera && vence(s) >= minuto - PENDIENTE_MIN;
+
 /**
- * Arma buses: { PPU: { servicio, hora, despacho, real, conductor, salio? } } a partir de las salidas del día.
- * - Manda la próxima salida sin hora real (que no esté perdida: hasta 30 min después de su hora).
- * - Si además ya salió antes, esa queda en `salio` ({ servicio, hora, real }).
+ * Arma buses a partir de las salidas del día:
+ *   { PPU: { servicio, hora, despacho, real, conductor, gps?, salio?, viene? } }
+ * Sentido R (sale del terminal), como siempre:
+ * - Manda la próxima salida pendiente; si además ya salió antes, esa queda en `salio`.
  * - Si no le queda ninguna pendiente, va la última que salió (con `real`).
+ * Sentido I (viene del cabezal al terminal), en `viene` = { servicio, hora, despacho, real, gps? } SIN conductor:
+ * - La que salió del cabezal hace menos de 75 min (va en camino); si no, la próxima pendiente.
+ * Un bus que solo tiene salida I queda como { viene }.
  */
 export function armarBuses(salidas, minuto = minutoChile()) {
   const porPpu = {};
   for (const s of Object.values(salidas)) (porPpu[s.ppu] ??= []).push(s);
   const buses = {};
-  for (const [ppu, l] of Object.entries(porPpu)) {
-    // Pendiente: sin hora real, el ICR todavía la muestra y no han pasado 30 min de su hora.
-    const pendientes = l.filter((s) => !s.real && !s.fuera && aMin(s.hora) >= minuto - PENDIENTE_MIN)
-      .sort((a, b) => aMin(a.hora) - aMin(b.hora));
-    const salieron = l.filter((s) => s.real).sort((a, b) => aMin(b.real) - aMin(a.real));
-    const prox = pendientes[0];
-    const ult = salieron[0];
+  for (const [ppu, todas] of Object.entries(porPpu)) {
+    const ida = todas.filter((s) => sentidoDe(s.servicio) === 'R');
+    const vuelta = todas.filter((s) => sentidoDe(s.servicio) === 'I');
+    const b = {};
+
+    const prox = ida.filter((s) => pendiente(s, minuto)).sort((x, y) => vence(x) - vence(y))[0];
+    const ult = ida.filter((s) => s.real).sort((x, y) => aMin(y.real) - aMin(x.real))[0];
     const base = prox ?? ult;
-    if (!base) continue;
-    buses[ppu] = {
-      servicio: base.servicio,
-      hora: base.hora,
-      despacho: base.despacho ?? null,
-      real: base.real ?? null,
-      conductor: base.conductor ?? null,
-      ...(base.gps ? { gps: true } : {}),
-      ...(prox && ult ? { salio: { servicio: ult.servicio, hora: ult.hora, real: ult.real, ...(ult.gps ? { gps: true } : {}) } } : {}),
-    };
+    if (base) {
+      Object.assign(b, {
+        servicio: base.servicio,
+        hora: base.hora,
+        despacho: base.despacho ?? null,
+        real: base.real ?? null,
+        conductor: base.conductor ?? null,
+        ...(base.gps ? { gps: true } : {}),
+        ...(prox && ult ? { salio: { servicio: ult.servicio, hora: ult.hora, real: ult.real, ...(ult.gps ? { gps: true } : {}) } } : {}),
+      });
+    }
+
+    const enCamino = vuelta.filter((s) => s.real && minuto - aMin(s.real) <= EN_CAMINO_MIN && minuto >= aMin(s.real) - 5)
+      .sort((x, y) => aMin(y.real) - aMin(x.real))[0];
+    const viene = enCamino ?? vuelta.filter((s) => pendiente(s, minuto)).sort((x, y) => vence(x) - vence(y))[0];
+    if (viene) {
+      b.viene = {
+        servicio: viene.servicio, hora: viene.hora, despacho: viene.despacho ?? null, real: viene.real ?? null,
+        ...(viene.gps ? { gps: true } : {}),
+      };
+    }
+    if (Object.keys(b).length) buses[ppu] = b;
   }
   return ordenado(buses);
 }
-
-const vence = (s) => aMin(s.despacho ?? s.hora); // hora en que debe salir
 
 /**
  * Reemplaza en `salidas` lo de un bloque recién leído. Lo último manda (la PPU de una salida puede cambiar),
@@ -130,7 +153,8 @@ export function fusionarBloque(salidas, servicio, bloque, lista, minuto, flota =
     const a = antes[k];
     const mismo = a && a.ppu === s.ppu;
     salidas[k] = {
-      servicio, bloque, hora: s.hora, despacho: s.despacho, ppu: s.ppu, conductor: s.conductor,
+      servicio, bloque, hora: s.hora, despacho: s.despacho, ppu: s.ppu,
+      conductor: sentidoDe(servicio) === 'I' ? null : s.conductor, // sentido I: sin conductor
       real: s.real ?? (mismo ? a.real ?? null : null),
       ...(!s.real && mismo && a.gps ? { gps: true, realMs: a.realMs } : {}),
     };
@@ -154,16 +178,17 @@ export function faltaHoraReal(salidas, minuto) {
 }
 
 /**
- * Completa la hora real con la salida del terminal que vio digiCAR (`digicar/flota` → buses → salida.fecha).
+ * Completa la hora real de un sentido con lo que vio digiCAR (`digicar/flota` → buses):
+ *   R: la salida del terminal (salida.fecha) · I: la salida del cabezal (salioDe.fecha, si es un cabezal).
  * Cuenta si salió entre 30 min antes y 90 min después de su hora de despacho, el mismo día. Si un bus tiene
  * varias salidas pendientes, la salida del GPS va a la de hora más cercana, y nunca la misma a dos.
- * @param gps { PPU: milisegundos de su última salida del terminal }
+ * @param gps { PPU: milisegundos de esa salida }
  * Devuelve [ 'SRSC51 10:06', ... ] para el log.
  */
-export function completarConGps(salidas, gps, dia) {
+export function completarConGps(salidas, gps, dia, sentido = 'R') {
   const hechas = [];
   const porPpu = {};
-  for (const s of Object.values(salidas)) (porPpu[s.ppu] ??= []).push(s);
+  for (const s of Object.values(salidas)) if (sentidoDe(s.servicio) === sentido) (porPpu[s.ppu] ??= []).push(s);
   for (const [ppu, l] of Object.entries(porPpu)) {
     const ms = gps[ppu];
     if (!ms || diaChile(new Date(ms)) !== dia) continue;
@@ -194,6 +219,14 @@ function describirCambios(antes, ahora) {
     else if (JSON.stringify(b) !== JSON.stringify(a)) l.push(`${ppu} cambió`);
   }
   for (const ppu of Object.keys(antes ?? {})) if (!ahora[ppu]) l.push(`${ppu} ya no figura`);
+  // Sentido I (viene del cabezal).
+  for (const [ppu, b] of Object.entries(ahora)) {
+    const a = antes?.[ppu]?.viene;
+    const v = b.viene;
+    if (!v) continue;
+    if (!a || a.hora !== v.hora || a.servicio !== v.servicio) l.push(`${ppu} viene ${v.despacho ?? v.hora} (${v.servicio})`);
+    else if (v.real && v.real !== a.real) l.push(`${ppu} salió del cabezal ${v.real}`);
+  }
   return l.length > 6 ? [...l.slice(0, 6), `y ${l.length - 6} más`] : l;
 }
 
@@ -265,6 +298,8 @@ export async function correrPlanillon({
   let rechazos = 0;
   let n = 0;
   let ultimoDigicar = 0;
+  let servicios = null; // R e I, se piden a la página una vez por corrida
+  let avisoBloque = false;
   let lecturasDigicar = 0;
   let notas = []; // lo que pasó en la pasada, para el log
   const sesion = new SesionIcr(usuario, claveIcr);
@@ -282,14 +317,35 @@ export async function correrPlanillon({
       }
     }
     if (!bloques) bloques = await sesion.bloques(fechaIcr());
+    // Servicios de los dos sentidos, una vez por corrida (si la página no responde, los de siempre).
+    if (!servicios) {
+      servicios = [];
+      for (const [sentido, campo] of Object.entries(CAMPO_SERVICIOS)) {
+        let l = [];
+        try {
+          l = await sesion.servicios(campo);
+        } catch (e) {
+          if (e.sesion) throw e;
+        }
+        if (!l.length) l = sentido === 'I' ? SERVICIOS_I : SERVICIOS_R;
+        servicios.push(...l);
+      }
+      console.log(`Planillón: servicios ${servicios.join(', ')}.`);
+    }
     const minuto = minutoChile();
     const b = bloqueDeAhora(bloques, minuto);
     if (!b) return null;
     const leer = [b.actual, b.siguiente, minuto - b.actual.desde < ANTERIOR_MIN ? b.anterior : null].filter(Boolean);
     const nuevas = [];
-    for (const servicio of SERVICIOS) {
+    for (const servicio of servicios) {
       for (const bl of leer) {
         const r = await sesion.bloque(servicio, bl.id);
+        // Si el ICR devolvió otro bloque que el pedido, no se mezcla (quedaría con la etiqueta equivocada).
+        if (r.id !== bl.id) {
+          if (!avisoBloque) console.warn(`[${horaChile()}] Planillón: pedí el bloque ${bl.id} de ${servicio} y llegó el ${r.id}; se ignora.`);
+          avisoBloque = true;
+          continue;
+        }
         nuevas.push({ servicio, bloque: bl.id, salidas: r.salidas });
       }
     }
@@ -302,14 +358,20 @@ export async function correrPlanillon({
       ultimoDigicar = Date.now();
       try {
         const buses = (await db.doc('digicar/flota').get()).data()?.buses ?? {};
-        const gps = {};
+        const delTerminal = {}; // R: salida del terminal
+        const delCabezal = {}; // I: salida de un cabezal
         for (const [ppu, v] of Object.entries(buses)) {
           const ms = v?.salida?.fecha?.toMillis?.();
-          if (ms) gps[ppuLimpia(ppu)] = ms;
+          if (ms) delTerminal[ppuLimpia(ppu)] = ms;
+          const c = v?.salioDe;
+          const msc = c?.fecha?.toMillis?.();
+          if (msc && /cabezal/i.test(String(c.lugar ?? ''))) delCabezal[ppuLimpia(ppu)] = msc;
         }
         lecturasDigicar++;
-        const hechas = completarConGps(salidas, gps, dia);
-        if (hechas.length) notas.push(`hora real por GPS: ${hechas.join(', ')}`);
+        const r = completarConGps(salidas, delTerminal, dia, 'R');
+        const i = completarConGps(salidas, delCabezal, dia, 'I');
+        if (r.length) notas.push(`salida real por GPS: ${r.join(', ')}`);
+        if (i.length) notas.push(`salida del cabezal por GPS: ${i.join(', ')}`);
       } catch (e) {
         console.warn(`[${horaChile()}] Planillón: no se pudo leer digicar/flota:`, e.message);
       }

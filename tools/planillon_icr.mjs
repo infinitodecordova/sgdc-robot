@@ -13,7 +13,16 @@
 // El RUT del conductor (`conductor`) se descarta apenas llega: no sale de este archivo.
 
 export const BASE = 'http://200.55.219.100:8090';
-export const SERVICIOS = ['1040-R', '1040-R-FTS', '1043-R', '1043-R-FTS'];
+// Sentido R: del terminal al cabezal (la salida del bus desde aquí). Sentido I: del cabezal al terminal (viene de vuelta).
+// Respaldo si ConfiguracionCtr (desencripta) no responde; lo normal es pedirlos con servicios().
+export const SERVICIOS_R = ['1040-R', '1040-R-FTS', '1043-R', '1043-R-FTS'];
+export const SERVICIOS_I = ['1040-I', '1040-I-FTS', '1043-I', '1043-I-FTS'];
+export const SERVICIOS = SERVICIOS_R;
+/// Lo que va en la URL de la página (despacho-planillon.html?id=…) para cada sentido.
+export const CAMPO_SERVICIOS = { R: '1040-R,1043-R', I: '1040-I,1043-I' };
+
+/// 'R' o 'I' según el servicio ("1040-I-FTS" → 'I').
+export const sentidoDe = (servicio) => (/-I(-|$)/.test(String(servicio)) ? 'I' : 'R');
 
 /// Falla de red (servidor caído, sin conexión, tiempo agotado): no va a ERRORES.
 export function esErrorDeRed(e) {
@@ -167,10 +176,10 @@ export class SesionIcr {
 
   /// POST a PlanillonCtr.php. Lanza ErrorIcr({sesion:true}) si la respuesta parece de sesión vencida
   /// (redirección, 401/403, HTML en vez de JSON o completado:false).
-  async _planillon(campos) {
+  async _planillon(campos, ruta = '/Server/PlanillonCtr.php') {
     const f = new FormData();
     for (const [k, v] of Object.entries(campos)) f.append(k, String(v));
-    const r = await this._pedir('/Server/PlanillonCtr.php', { method: 'POST', body: f });
+    const r = await this._pedir(ruta, { method: 'POST', body: f });
     const texto = await r.text();
     if (r.status >= 300 && r.status < 400) throw new ErrorIcr(`el ICR redirigió (${r.status}): sesión vencida`, { sesion: true, status: r.status });
     if (r.status === 401 || r.status === 403) throw new ErrorIcr(`el ICR respondió ${r.status}: sesión vencida`, { sesion: true, status: r.status });
@@ -187,6 +196,13 @@ export class SesionIcr {
     return j;
   }
 
+  /// Servicios que la página muestra para un `id` de la URL (ConfiguracionCtr, accion=desencripta: solo
+  /// traduce el parámetro, no cambia nada). '1040-R,1043-R' → ['1040-R', '1040-R-FTS', '1043-R', '1043-R-FTS'].
+  async servicios(campo) {
+    const j = await this._planillon({ accion: 'desencripta', campo }, '/Server/ConfiguracionCtr.php');
+    return (j.servicios ?? []).map(String).filter(Boolean);
+  }
+
   /// Bloques del día: [{ id, desde, hasta }] con minutos desde medianoche, ordenados.
   async bloques(fecha = fechaIcr()) {
     const j = await this._planillon({ accion: 'planillon_lista_bloques', fecha });
@@ -197,8 +213,13 @@ export class SesionIcr {
   }
 
   /// Salidas de un bloque ('Actual' o el id). Devuelve { id, bloque, salidas } y descarta el RUT.
+  /// Un bloque dado se pide como la página: bloqueseleccionado=Especifico + idbloqueactual=<id> (con el id
+  /// en bloqueseleccionado el ICR lo ignora y devuelve el actual: visto el 19-11).
   async bloque(servicio, seleccionado = 'Actual', fecha = fechaIcr()) {
-    const j = await this._planillon({ accion: 'planillon_bloque_actual', servicio, bloqueseleccionado: seleccionado, fecha });
+    const campos = seleccionado === 'Actual'
+      ? { accion: 'planillon_bloque_actual', servicio, bloqueseleccionado: 'Actual', fecha }
+      : { accion: 'planillon_bloque_actual', servicio, idbloqueactual: seleccionado, bloqueseleccionado: 'Especifico', fecha };
+    const j = await this._planillon(campos);
     const salidas = (j.detalle ?? []).map((d) => ({
       servicio,
       hora: hhmm(d.hora),

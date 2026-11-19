@@ -1,6 +1,8 @@
 // SOLO LECTURA (no escribe en Firestore ni cambia nada en el ICR): entra al planillón de despacho,
 // lista los bloques del día y muestra las salidas con PPU del bloque actual y el siguiente de los
-// 4 servicios del terminal. Lo corre el usuario en su PC.
+// servicios de los dos sentidos (R: sale del terminal; I: viene del cabezal, sin conductor).
+// Si está tools/serviceAccount.json, marca con ★ los buses del semáforo (solo lee semaforoch).
+// Lo corre el usuario en su PC.
 //
 //   ICR_USUARIO=... ICR_CLAVE=... node tools/planillon_espiar.mjs            una mirada
 //   node tools/planillon_espiar.mjs --expira 40                             además, deja la sesión
@@ -9,10 +11,26 @@
 // Si faltan ICR_USUARIO / ICR_CLAVE, los pregunta (la clave no se ve).
 // Muestra solo hora, despacho, real, PPU y nombre corto. Nunca el RUT. No muestra la respuesta del login.
 
+import { existsSync, readFileSync } from 'node:fs';
 import readline from 'node:readline';
 import {
-  SERVICIOS, SesionIcr, bloqueDeAhora, esErrorDeRed, fechaIcr, minutoChile,
+  CAMPO_SERVICIOS, SERVICIOS_I, SERVICIOS_R, SesionIcr, bloqueDeAhora, esErrorDeRed, fechaIcr, minutoChile, sentidoDe,
 } from './planillon_icr.mjs';
+
+/// Los 48 PPU del semáforo, si está serviceAccount.json en esta carpeta (solo lectura). Si no, null.
+async function flotaSemaforo() {
+  const ruta = new URL('./serviceAccount.json', import.meta.url);
+  if (!existsSync(ruta)) return null;
+  try {
+    const admin = (await import('firebase-admin')).default;
+    admin.initializeApp({ credential: admin.credential.cert(JSON.parse(readFileSync(ruta, 'utf8'))) });
+    const s = await admin.firestore().collection('semaforoch').get();
+    return new Set(s.docs.map((d) => String(d.data().ppu ?? d.id).toUpperCase().replace(/[^A-Z0-9]/g, '')));
+  } catch (e) {
+    console.log(`(no pude leer los buses del semáforo: ${e.message})`);
+    return null;
+  }
+}
 
 function preguntar(texto, oculto = false) {
   return new Promise((ok) => {
@@ -42,21 +60,49 @@ try {
   if (!b) console.log('Ahora no cae en ningún bloque.');
   else console.log(`Bloque actual según la hora: ${b.actual.nombre} · siguiente: ${b.siguiente?.nombre ?? '—'}`);
 
-  for (const servicio of SERVICIOS) {
+  // Servicios de cada sentido, como los pide la página (despacho-planillon.html?id=…).
+  const servicios = [];
+  for (const [sentido, campo] of Object.entries(CAMPO_SERVICIOS)) {
+    try {
+      const l = await s.servicios(campo);
+      console.log(`Servicios ${sentido} (id=${campo}): ${l.join(', ') || '(ninguno)'}`);
+      servicios.push(...l);
+    } catch (e) {
+      const resp = sentido === 'I' ? SERVICIOS_I : SERVICIOS_R;
+      console.log(`Servicios ${sentido} (id=${campo}): falló (${e.message}); uso ${resp.join(', ')}`);
+      servicios.push(...resp);
+    }
+  }
+  const flota = await flotaSemaforo();
+  console.log(flota ? `Buses del semáforo: ${flota.size} (★ = es nuestro)` : 'Sin serviceAccount.json: no marco cuáles son nuestros.');
+  const resumen = {};
+
+  for (const servicio of servicios) {
     const pedidos = [['Actual', 'actual'], ...(b?.actual ? [[b.actual.id, `id ${b.actual.id}`]] : []),
       ...(b?.siguiente ? [[b.siguiente.id, 'siguiente']] : [])];
     for (const [sel, etiqueta] of pedidos) {
       try {
         const r = await s.bloque(servicio, sel, fecha);
         const conPpu = r.salidas.filter((x) => x.ppu);
-        console.log(`\n${servicio} · ${etiqueta} → ${r.bloque || r.id}: ${r.salidas.length} salidas, ${conPpu.length} con PPU`);
+        const nuestras = flota ? conPpu.filter((x) => flota.has(x.ppu)) : conPpu;
+        console.log(`\n${servicio} · ${etiqueta} → ${r.bloque || r.id}: ${r.salidas.length} salidas, ${conPpu.length} con PPU` +
+          (flota ? `, ${nuestras.length} nuestras` : ''));
         for (const x of conPpu) {
-          console.log(`  ${x.hora} · despacho ${x.despacho ?? '—'} · real ${x.real ?? '—'} · ${x.ppu} · ${x.conductor ?? '—'} · ${x.estado ?? ''}`);
+          const mio = flota?.has(x.ppu) ? '★' : ' ';
+          // Sentido I: sin conductor (no se guarda ni se muestra).
+          const quien = sentidoDe(servicio) === 'I' ? '' : ` · ${x.conductor ?? '—'}`;
+          console.log(` ${mio}${x.hora} · despacho ${x.despacho ?? '—'} · real ${x.real ?? '—'} · ${x.ppu}${quien} · ${x.estado ?? ''}`);
         }
+        const r2 = (resumen[sentidoDe(servicio)] ??= new Set()); // Set: "Actual" e "id" repiten las mismas
+        for (const x of nuestras) r2.add(`${x.ppu} ${servicio} ${x.despacho ?? x.hora}`);
       } catch (e) {
         console.log(`\n${servicio} · ${etiqueta}: falló (${e.message})`);
       }
     }
+  }
+
+  for (const [sentido, l] of Object.entries(resumen)) {
+    console.log(`\nSentido ${sentido}: ${l.size} salidas ${flota ? 'de buses nuestros' : 'con PPU'} (actual y siguiente): ${[...l].join(' · ') || '—'}`);
   }
 
   // Cómo se ve una sesión vencida: el mismo pedido sin cookie y con una cookie inventada.
