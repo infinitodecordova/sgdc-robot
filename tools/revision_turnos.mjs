@@ -9,6 +9,8 @@
 //   4. El SGDC tiene una carga de un bus que no está en la foto del turno ni en otros terminales.
 //   5. El SGDC tiene un bus cargando en dos pistolas a la vez (patente mal digitada en el cargador). Si en
 //      esa pistola hay un bus anotado sin carga a su nombre, se dice que la carga es probablemente suya.
+//   6. Un bus anotado con pistola en la que el SGDC no lo tiene, o con un % final que difiere en más de
+//      2 puntos del de su última carga finalizada en el SGDC (p. ej. el 100 % falso del patio).
 // Cada turno se revisa una sola vez (candado en privado/revision_<id del turno>).
 // No cambia nada del turno: solo avisa. Lecturas: ~3 turnos + ~3 candados por pasada y, una vez por
 // turno, sus cargas del SGDC (~40–80).
@@ -22,6 +24,7 @@ const MARGEN_FIN_MIN = 20;
 // Solo turnos cerrados en las últimas 36 h (después de eso ya no se espera más al SGDC).
 const VENTANA_H = 36;
 const SUBE = 2; // puntos: % final que supera al inicial en más que esto = se anotó como cargado
+const TOLERANCIA = 2; // puntos: diferencia aceptada entre el % final anotado y el del SGDC
 const PISTOLAS = new Set([
   'B7-L', 'B7-R', 'B8-L', 'B8-R', 'B9-L', 'B9-R', 'B10-L', 'B10-R', 'B11-L', 'B11-R',
   'B12-L', 'B12-R', 'B13-L', 'B13-R', 'A1-L', 'A1-R', 'A2-L', 'A2-R', 'A3-L', 'A3-R',
@@ -101,6 +104,17 @@ export function problemasTurno(t, cargas, sugerencias = []) {
     }
     if (b.jornada === 'NI' && anotadoCargado) {
       out.push(`${ppu}: marcado NI (no ingresado a carga) pero tiene ${como}.`);
+    }
+    // Anotado con carga y el SGDC también la tiene: ¿cuadran la pistola y el % final?
+    if (l.length && conPistola && !l.some((c) => c.pistola === b.coordenada)) {
+      out.push(`${ppu}: anotado en ${b.coordenada} y el SGDC lo tiene cargando en ` +
+        `${[...new Set(l.map((c) => c.pistola ?? '—'))].join(', ')}.`);
+    }
+    const ultima = l[l.length - 1];
+    if (ultima?.estado === 'Finalizada' && ultima.socFin != null && b.pctFinal != null &&
+        Math.abs(b.pctFinal - ultima.socFin) > TOLERANCIA) {
+      out.push(`${ppu}: anotado con ${b.pctFinal} % final y el SGDC dice ${ultima.socFin} % ` +
+        `(${ultima.pistola ?? '—'}, terminó ${hm(finDe(ultima))}).`);
     }
     if (l.length && !conPistola && b.pctFinal == null && b.jornada !== 'NI') {
       const u = l[l.length - 1];
