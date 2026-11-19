@@ -231,12 +231,19 @@ export function completar(buses, antes, ahoraMs, escala = 1) {
 /// Suma muestras a la curva (los datos viejos pesan menos), igual que antes.
 /// [curva] = { tramos, tramosSolo, tramosCompartido }: todas van a "tramos" (general, como antes) y,
 /// si se sabe, también a la del cargador solo o compartido.
+// Cada medición nueva le baja el peso a lo anterior (promedio que olvida): × 0,98 ≈ las últimas ~50.
+// El 95–100 olvida más rápido (× 0,95 ≈ las últimas ~20, ~1 día con cargador solo): entran pocas mediciones
+// y arrastraba las de antes del arreglo del 18-11 (3,67 min/% el 18-11; el SGDC dice ~2,5).
+export const OLVIDO = 0.98;
+export const OLVIDO_95 = 0.95;
+
 export function sumarCurva(curva, muestras) {
   const sumar = (tramos, t, min, pct) => {
     const c = tramos[t] ?? { min: 0, pct: 0, n: 0 };
+    const k = Number(t) >= 95 ? OLVIDO_95 : OLVIDO;
     tramos[t] = {
-      min: Math.round((c.min * 0.98 + min) * 100) / 100,
-      pct: Math.round((c.pct * 0.98 + pct) * 100) / 100,
+      min: Math.round((c.min * k + min) * 100) / 100,
+      pct: Math.round((c.pct * k + pct) * 100) / 100,
       n: (c.n ?? 0) + 1,
     };
   };
