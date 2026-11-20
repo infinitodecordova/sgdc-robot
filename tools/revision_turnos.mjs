@@ -11,6 +11,7 @@
 //      esa pistola hay un bus anotado sin carga a su nombre, se dice que la carga es probablemente suya.
 //   6. Un bus anotado con pistola en la que el SGDC no lo tiene, o con un % final que difiere en más de
 //      2 puntos del de su última carga finalizada en el SGDC (p. ej. el 100 % falso del patio).
+//      No se revisa el % de las cargas cortadas por una caída del SGDC (ver `cortesSgdc`).
 // Cada turno se revisa una sola vez (candado en privado/revision_<id del turno>).
 // No cambia nada del turno: solo avisa. Lecturas: ~3 turnos + ~3 candados por pasada y, una vez por
 // turno, sus cargas del SGDC (~40–80).
@@ -40,8 +41,33 @@ const hm = (d) => {
 };
 const pct = (a, b) => `${a ?? '—'}→${b ?? '—'}`;
 // Fin de una carga: el del SGDC, o inicio + minutos, o (en proceso, sin datos) inicio + 3 h.
+// Caída del SGDC: si deja de recibir datos, todas las cargas en curso quedan "Finalizada" a la misma
+// hora con el % que tenían (20-11 01:56–01:59: 14 cargas entre 59 y 96 %). Se reconoce porque
+// CORTE_MIN o más cargas terminan bajo 100 % dentro de CORTE_VENTANA_MIN minutos.
+const CORTE_MIN = 5;
+const CORTE_VENTANA_MIN = 5;
 const finDe = (c) => aFecha(c.fin) ??
   new Date(c.inicio.getTime() + (c.minutos ? c.minutos * 60000 : 3 * 3600 * 1000));
+
+/// Cargas cortadas por una caída del SGDC (Set) y la hora de cada corte (lista de Date).
+export function cortesSgdc(cargas) {
+  const bajo = cargas
+    .filter((c) => c.estado === 'Finalizada' && c.fin && c.socFin != null && c.socFin < 100)
+    .sort((a, b) => aFecha(a.fin) - aFecha(b.fin));
+  const cortadas = new Set();
+  const horas = [];
+  for (let i = 0; i < bajo.length; i++) {
+    const t0 = aFecha(bajo[i].fin).getTime();
+    let j = i;
+    while (j + 1 < bajo.length && aFecha(bajo[j + 1].fin).getTime() - t0 <= CORTE_VENTANA_MIN * 60000) j++;
+    if (j - i + 1 >= CORTE_MIN) {
+      for (let k = i; k <= j; k++) cortadas.add(bajo[k]);
+      horas.push(aFecha(bajo[j].fin));
+      i = j;
+    }
+  }
+  return { cortadas, horas };
+}
 
 /// Problemas de un turno (lista de textos). Exportada para probarla sin Firestore.
 /// [sugerencias]: se le agregan las patentes mal digitadas que la app puede corregir con un toque
@@ -72,6 +98,7 @@ export function problemasTurno(t, cargas, sugerencias = []) {
       }
     }
   }
+  const { cortadas } = cortesSgdc(cargas);
   const explicadas = new Set(); // cargas dobles que calzan con un bus anotado sin carga
 
   const out = [];
@@ -111,7 +138,7 @@ export function problemasTurno(t, cargas, sugerencias = []) {
         `${[...new Set(l.map((c) => c.pistola ?? '—'))].join(', ')}.`);
     }
     const ultima = l[l.length - 1];
-    if (ultima?.estado === 'Finalizada' && ultima.socFin != null && b.pctFinal != null &&
+    if (ultima?.estado === 'Finalizada' && ultima.socFin != null && !cortadas.has(ultima) && b.pctFinal != null &&
         Math.abs(b.pctFinal - ultima.socFin) > TOLERANCIA) {
       out.push(`${ppu}: anotado con ${b.pctFinal} % final y el SGDC dice ${ultima.socFin} % ` +
         `(${ultima.pistola ?? '—'}, terminó ${hm(finDe(ultima))}).`);
@@ -185,6 +212,9 @@ export async function revisarTurnos(db, cargas, datosSgdc, { probar = false, des
 
     const sugerencias = [];
     const problemas = problemasTurno(t, delTurno, sugerencias);
+    for (const h of cortesSgdc(delTurno).horas) {
+      console.log(`Revisión de turnos: el SGDC se cortó ~${hm(h)} en el ${titulo}; no se revisa el % final de esas cargas.`);
+    }
     console.log(`Revisión de turnos: ${titulo} (cerró ${t.cerradoPorNombre ?? '—'}) · ` +
       `${delTurno.length} cargas SGDC · ${problemas.length ? `${problemas.length} a revisar` : 'todo cuadra'}.`);
     for (const p of problemas) console.log('   ', p);
