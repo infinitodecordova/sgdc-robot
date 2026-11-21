@@ -90,7 +90,8 @@ const pendiente = (s, minuto) => !s.real && !s.fuera && vence(s) >= minuto - PEN
  *   { PPU: { servicio, hora, despacho, real, conductor, gps?, salio?, viene? } }
  * Sentido R (sale del terminal), como siempre:
  * - Manda la próxima salida pendiente; si además ya salió antes, esa queda en `salio`.
- * - Si no le queda ninguna pendiente, va la última que salió (con `real`).
+ * - Si no le queda ninguna pendiente, va la última ya cumplida por hora programada (salió, el ICR la sacó o
+ *   venció), aunque todavía no tenga `real`; nunca una salida anterior solo porque esa sí tiene hora real.
  * Sentido I (viene del cabezal al terminal), en `viene` = { servicio, hora, despacho, real, gps? } SIN conductor:
  * - La que salió del cabezal hace menos de 75 min (va en camino); si no, la próxima pendiente.
  * Un bus que solo tiene salida I queda como { viene }.
@@ -105,7 +106,10 @@ export function armarBuses(salidas, minuto = minutoChile()) {
     const b = {};
 
     const prox = ida.filter((s) => pendiente(s, minuto)).sort((x, y) => vence(x) - vence(y))[0];
-    const ult = ida.filter((s) => s.real).sort((x, y) => aMin(y.real) - aMin(x.real))[0];
+    // La última ya cumplida por HORA PROGRAMADA (salió, el ICR la sacó o venció), tenga o no hora real:
+    // si el ICR saca la de las 18:17 antes de que el GPS la vea, no hay que volver a mostrar la de las 14:29.
+    const ult = ida.filter((s) => !pendiente(s, minuto))
+      .sort((x, y) => vence(y) - vence(x) || (y.real ? 1 : 0) - (x.real ? 1 : 0))[0];
     const base = prox ?? ult;
     if (base) {
       Object.assign(b, {
@@ -115,7 +119,7 @@ export function armarBuses(salidas, minuto = minutoChile()) {
         real: base.real ?? null,
         conductor: base.conductor ?? null,
         ...(base.gps ? { gps: true } : {}),
-        ...(prox && ult ? { salio: { servicio: ult.servicio, hora: ult.hora, real: ult.real, ...(ult.gps ? { gps: true } : {}) } } : {}),
+        ...(prox && ult?.real ? { salio: { servicio: ult.servicio, hora: ult.hora, real: ult.real, ...(ult.gps ? { gps: true } : {}) } } : {}),
       });
     }
 
