@@ -246,6 +246,7 @@ export async function cierreAutomatico(db, cargas, datosSgdc) {
       pct3: b.pct3 ?? null,
       kwConsumo: b.kwConsumo ?? null,
       soh: b.soh ?? null,
+      sinPatio: b.sinPatio === true ? true : null,
       kwhSgdc: kwh == null ? null : Math.round(kwh * 10) / 10,
       sohSgdc: soh,
     });
@@ -254,6 +255,7 @@ export async function cierreAutomatico(db, cargas, datosSgdc) {
     const mantener = PERSISTENTES.has(b.jornada);
     batch.update(d.ref, {
       coordenada: null, pctInicial: null, pctFinal: null, pct1: null, pct2: null, pct3: null, kwConsumo: null,
+      sinPatio: null,
       ...(mantener ? {} : { jornada: null, observacion: null }),
       actualizado: FieldValue.serverTimestamp(),
       actualizadoPor: 'robot',

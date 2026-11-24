@@ -12,6 +12,8 @@
 //   6. Un bus anotado con pistola en la que el SGDC no lo tiene, o con un % final que difiere en más de
 //      2 puntos del de su última carga finalizada en el SGDC (p. ej. el 100 % falso del patio).
 //      No se revisa el % de las cargas cortadas por una caída del SGDC (ver `cortesSgdc`).
+// Los buses que la app marcó `sinPatio` (carga anotada con el patio sin datos en vivo) no se acusan por
+// faltar en el SGDC ni por el % final: esas cargas no quedan en el sistema. Se listan aparte, como dato.
 // Cada turno se revisa una sola vez (candado en privado/revision_<id del turno>).
 // No cambia nada del turno: solo avisa. Lecturas: ~3 turnos + ~3 candados por pasada y, una vez por
 // turno, sus cargas del SGDC (~40–80).
@@ -72,7 +74,7 @@ export function cortesSgdc(cargas) {
 /// Problemas de un turno (lista de textos). Exportada para probarla sin Firestore.
 /// [sugerencias]: se le agregan las patentes mal digitadas que la app puede corregir con un toque
 /// ({ pistola, de, a, inicio, kwh, soh, socInicio, socFin }).
-export function problemasTurno(t, cargas, sugerencias = []) {
+export function problemasTurno(t, cargas, sugerencias = [], sinPatio = []) {
   const porBus = new Map();
   for (const c of cargas) {
     const p = norma(c.ppu);
@@ -127,7 +129,8 @@ export function problemasTurno(t, cargas, sugerencias = []) {
           'digitó mal en el cargador. Lo anotado está bien; el error es del SGDC.');
         continue;
       }
-      out.push(`${ppu}: anotado como cargado (${como}) y el SGDC no tiene ninguna carga suya en el turno.`);
+      if (b.sinPatio === true) sinPatio.push(`${ppu} (${como})`);
+      else out.push(`${ppu}: anotado como cargado (${como}) y el SGDC no tiene ninguna carga suya en el turno.`);
     }
     if (b.jornada === 'NI' && anotadoCargado) {
       out.push(`${ppu}: marcado NI (no ingresado a carga) pero tiene ${como}.`);
@@ -140,8 +143,12 @@ export function problemasTurno(t, cargas, sugerencias = []) {
     const ultima = l[l.length - 1];
     if (ultima?.estado === 'Finalizada' && ultima.socFin != null && !cortadas.has(ultima) && b.pctFinal != null &&
         Math.abs(b.pctFinal - ultima.socFin) > TOLERANCIA) {
-      out.push(`${ppu}: anotado con ${b.pctFinal} % final y el SGDC dice ${ultima.socFin} % ` +
-        `(${ultima.pistola ?? '—'}, terminó ${hm(finDe(ultima))}).`);
+      if (b.sinPatio === true) {
+        sinPatio.push(`${ppu} (anotado ${b.pctFinal} % final, el SGDC alcanzó a registrar ${ultima.socFin} %)`);
+      } else {
+        out.push(`${ppu}: anotado con ${b.pctFinal} % final y el SGDC dice ${ultima.socFin} % ` +
+          `(${ultima.pistola ?? '—'}, terminó ${hm(finDe(ultima))}).`);
+      }
     }
     if (l.length && !conPistola && b.pctFinal == null && b.jornada !== 'NI') {
       const u = l[l.length - 1];
@@ -211,19 +218,23 @@ export async function revisarTurnos(db, cargas, datosSgdc, { probar = false, des
     });
 
     const sugerencias = [];
-    const problemas = problemasTurno(t, delTurno, sugerencias);
+    const sinPatio = [];
+    const problemas = problemasTurno(t, delTurno, sugerencias, sinPatio);
     for (const h of cortesSgdc(delTurno).horas) {
       console.log(`Revisión de turnos: el SGDC se cortó ~${hm(h)} en el ${titulo}; no se revisa el % final de esas cargas.`);
     }
     console.log(`Revisión de turnos: ${titulo} (cerró ${t.cerradoPorNombre ?? '—'}) · ` +
       `${delTurno.length} cargas SGDC · ${problemas.length ? `${problemas.length} a revisar` : 'todo cuadra'}.`);
     for (const p of problemas) console.log('   ', p);
+    if (sinPatio.length) console.log(`    anotadas sin patio en vivo (no se acusan): ${sinPatio.join(' · ')}`);
     for (const x of sugerencias) console.log(`    sugerencia: carga de ${x.pistola} ${x.de} → ${x.a} (${x.kwh ?? '—'} kWh)`);
     if (probar) continue;
 
     // El candado primero: si otra corrida ya lo revisó, no se repite el aviso.
     try {
-      await candado.create({ fecha: FieldValue.serverTimestamp(), turno: d.id, problemas: problemas.length });
+      await candado.create({
+        fecha: FieldValue.serverTimestamp(), turno: d.id, problemas: problemas.length, sinPatio: sinPatio.length,
+      });
     } catch (e) {
       if (e.code === 6 || /already exists/i.test(e.message)) continue;
       throw e;
@@ -235,7 +246,11 @@ export async function revisarTurnos(db, cargas, datosSgdc, { probar = false, des
       mensaje: `Turno ${titulo} (cerró ${t.cerradoPorNombre ?? '—'}): ${problemas.length} ` +
         `${problemas.length === 1 ? 'bus no cuadra' : 'buses no cuadran'} con el SGDC. ` +
         'Revísalo en HISTORIAL DE TURNOS y pregunta a quien lo anotó.\n' +
-        problemas.map((p) => `• ${p}`).join('\n'),
+        problemas.map((p) => `• ${p}`).join('\n') +
+        (sinPatio.length
+          ? `\n\nAnotadas con el patio sin datos en vivo (el SGDC no las tiene completas; se deja lo anotado, ` +
+            `no se acusan): ${sinPatio.join(' · ')}.`
+          : ''),
       stack: '',
       plataforma: 'GitHub',
       ultima: FieldValue.serverTimestamp(),

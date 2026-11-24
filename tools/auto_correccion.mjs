@@ -107,8 +107,11 @@ export function cambiosSgdc(b, cargasBus) {
   const poner = (k, v) => {
     if (v != null && b[k] !== v) cambios[k] = { antes: b[k] ?? null, despues: v };
   };
-  if (b.pctInicial == null || distinto(b.pctInicial, socInicio)) poner('pctInicial', socInicio);
-  if (b.pctFinal == null || distinto(b.pctFinal, socFin)) poner('pctFinal', socFin);
+  // Anotada con el patio caído (sinPatio): el SGDC tiene a lo más una parte de la carga, así que
+  // solo se rellenan los % vacíos y no se pisa lo que anotaron los bomberos.
+  const pisar = b.sinPatio !== true;
+  if (b.pctInicial == null || (pisar && distinto(b.pctInicial, socInicio))) poner('pctInicial', socInicio);
+  if (b.pctFinal == null || (pisar && distinto(b.pctFinal, socFin))) poner('pctFinal', socFin);
   if (!b.coordenada && PISTOLAS.has(ultima.pistola)) poner('coordenada', ultima.pistola);
   if (!b.jornada || (['M', 'T', 'N'].includes(b.jornada) && b.jornada !== jornada)) poner('jornada', jornada);
   return cambios;
