@@ -89,10 +89,12 @@ export function cortesSgdc(cargas) {
 /// ({ pistola, de, a, inicio, kwh, soh, socInicio, socFin }).
 /**
  * @param dh cruce con los cargadores (emparejar() de dhemax_cruce.mjs) o null si Dhemax no está disponible.
- * @param info se llena con { confirmadas: [ppu] } (cargas que el SGDC no tenía y el cargador sí, bien anotadas).
+ * @param info se llena con { confirmadas: [ppu] } (cargas que el SGDC no tenía y el cargador sí, bien anotadas) y
+ *   { erroresSgdc: [texto] } (patente mal digitada en el cargador: lo anotado está bien, no cuenta como problema).
  */
 export function problemasTurno(t, cargas, sugerencias = [], sinPatio = [], dh = null, info = {}) {
   info.confirmadas ??= [];
+  info.erroresSgdc ??= [];
   const porBus = new Map();
   for (const c of cargas) {
     const p = norma(c.ppu);
@@ -145,7 +147,7 @@ export function problemasTurno(t, cargas, sugerencias = [], sinPatio = [], dh = 
           pistola: d.c.pistola, de: d.ppu, a: ppu, inicio: d.c.inicio.toISOString(),
           kwh: d.c.kwh ?? null, soh: d.c.soh ?? null, socInicio: d.c.socInicio ?? null, socFin: d.c.socFin ?? null,
         });
-        out.push(`${ppu}: anotado como cargado (${como}) sin carga a su nombre. En el SGDC la carga de ` +
+        info.erroresSgdc.push(`${ppu}: anotado como cargado (${como}) sin carga a su nombre. En el SGDC la carga de ` +
           `${d.c.pistola} (${hm(d.c.inicio)}, ${pct(d.c.socInicio, d.c.socFin)}) está a nombre de ${d.ppu}, ` +
           `que a esa hora también cargaba en ${d.otra.pistola}: probablemente es de ${ppu} y la patente se ` +
           'digitó mal en el cargador. Lo anotado está bien; el error es del SGDC.');
@@ -316,6 +318,7 @@ export async function revisarTurnos(db, cargas, datosSgdc, { probar = false, des
       `${info.confirmadas.length} confirmadas con el cargador · ` +
       `${problemas.length ? `${problemas.length} a revisar` : 'todo cuadra'}.`);
     for (const p of problemas) console.log('   ', p);
+    for (const p of info.erroresSgdc) console.log('    (error del SGDC, no cuenta)', p);
     if (sinPatio.length) console.log(`    anotadas sin patio en vivo (no se acusan): ${sinPatio.join(' · ')}`);
     for (const x of sugerencias) console.log(`    sugerencia: carga de ${x.pistola} ${x.de} → ${x.a} (${x.kwh ?? '—'} kWh)`);
     if (probar) continue;
@@ -337,7 +340,29 @@ export async function revisarTurnos(db, cargas, datosSgdc, { probar = false, des
         confirmadas: info.confirmadas.length, revisado: FieldValue.serverTimestamp(),
       },
     });
-    if (!problemas.length) continue;
+    if (!problemas.length && !info.erroresSgdc.length) continue;
+    if (!problemas.length) {
+      // Solo errores del SGDC: lo anotado está bien; se deja como aviso informativo.
+      await db.collection('errores').doc(`revision_${dia}_${t.turno}`).set({
+        origen: 'revisión de turno',
+        donde: 'GitHub Actions · sgdc-robot',
+        mensaje: `Turno ${titulo} (cerró ${t.cerradoPorNombre ?? '—'}): lo anotado cuadra, pero el SGDC tiene ` +
+          `${info.erroresSgdc.length === 1 ? 'una carga' : `${info.erroresSgdc.length} cargas`} a nombre de otro bus ` +
+          '(patente mal digitada en el cargador). No hay que corregir nada en el semáforo.\n' +
+          info.erroresSgdc.map((p) => `• ${p}`).join('\n'),
+        stack: '',
+        plataforma: 'GitHub',
+        ultima: FieldValue.serverTimestamp(),
+        ultimoUsuario: 'robot',
+        usuarios: FieldValue.arrayUnion('robot'),
+        veces: FieldValue.increment(1),
+        resuelto: false,
+        turnoId: d.id,
+        sugerencias,
+      }, { merge: true });
+      console.log(`Aviso al admin: turno ${titulo}, solo errores del SGDC (no cuentan).`);
+      continue;
+    }
     const contra = dh ? 'el SGDC ni con los cargadores' : 'el SGDC';
     await db.collection('errores').doc(`revision_${dia}_${t.turno}`).set({
       origen: 'revisión de turno',
@@ -347,6 +372,9 @@ export async function revisarTurnos(db, cargas, datosSgdc, { probar = false, des
         (soloCargadores ? 'El SGDC no tiene datos de este turno: se revisó solo con los cargadores (Dhemax). ' : '') +
         'Revísalo en HISTORIAL DE TURNOS y pregunta a quien lo anotó.\n' +
         problemas.map((p) => `• ${p}`).join('\n') +
+        (info.erroresSgdc.length
+          ? `\n\nError del SGDC (lo anotado está bien, no cuenta): ${info.erroresSgdc.map((p) => `\n• ${p}`).join('')}`
+          : '') +
         (info.confirmadas.length
           ? `\n\n${info.confirmadas.length} ${info.confirmadas.length === 1 ? 'carga que el SGDC no tiene quedó confirmada' : 'cargas que el SGDC no tiene quedaron confirmadas'} con el cargador.`
           : '') +

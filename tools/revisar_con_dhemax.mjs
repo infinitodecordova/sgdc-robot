@@ -136,6 +136,7 @@ for (const t of turnos) {
     `cargadores ${String(nDh).padStart(2)}${dh ? '' : ' (sin cruce)'} · antes ${String(antes.length).padStart(2)} → ` +
     `ahora ${String(despues.length).padStart(2)} · confirmadas ${info.confirmadas.length}`);
   if (DETALLE) for (const p of despues) console.log(`      • ${p}`);
+  if (DETALLE) for (const p of info.erroresSgdc) console.log(`      (error del SGDC, no cuenta) ${p}`);
   if (GUARDAR && !EXCEL && dh) {
     await db.doc(`dhemaxTurnos/${t.id}`).set({
       turnoId: t.id, dia: t.dia, turno: t.turno, calculado: admin.firestore.FieldValue.serverTimestamp(), ...paraFirestore(dh),
