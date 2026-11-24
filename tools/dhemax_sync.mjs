@@ -8,8 +8,10 @@
 // Modo loop (workflow dhemax.yml, todo el día): ~55 min por corrida y se encadena.
 //   node dhemax_sync.mjs --loop --cada 60
 //   - en vivo (lineasTerminal) en cada pasada (cada 60 s);
-//   - informe de cargas del día de turno de ayer y de hoy cada 2 pasadas.
-// Escribe dhemax/hoy SOLO si cambió algo, máximo 1 vez cada 2 min, más un control cada 10 min.
+//   - informe de cargas del día de turno de ayer y de hoy cada 5 pasadas (24-11: las cargas aparecen ya en curso,
+//     con fin = última lectura del medidor, cada ~5 min, y sf/kwh subiendo hasta que terminan).
+// Escribe dhemax/hoy (nadie lo lee: es respaldo) solo si hay cargas nuevas, máximo 1 vez cada 5 min, más un
+// control cada 30 min con el vivo. El vivo y el avance de las cargas en curso no cuentan como cambio.
 // dhemax/hoy = { actualizado, ok, error, dias, cargas: { tr: {...} }, vivo: { pistola: {...} }, medicion }
 // Además un control chico en config/dhemax (lo escucha la app para la tira de robots, sin leer dhemax/hoy):
 // { ultimaSync, ok, error, cargando, cargas, medicion: {atraso, intervalo, enCurso, n} }, cada 10 min o si
@@ -28,11 +30,12 @@ import { fileURLToPath } from 'node:url';
 import readline from 'node:readline';
 import { ErrorDhemax, SesionDhemax, diaChile, esErrorDeRed } from './dhemax_api.mjs';
 
-const ESCRIBIR_MS = 2 * 60000; // máximo 1 escritura cada 2 min
-const CONTROL_MS = 10 * 60000; // control aunque no cambie nada
+const ESCRIBIR_MS = 5 * 60000; // dhemax/hoy: máximo 1 escritura cada 5 min (cargas nuevas)
+const GUARDAR_MS = 30 * 60000; // dhemax/hoy: control con el vivo aunque no haya cargas nuevas
+const CONTROL_MS = 10 * 60000; // config/dhemax (lo escucha la app)
 const AVISO_MS = 60 * 60000; // aviso en ERRORES máximo 1 por hora
 const PAUSA_LOGIN_MS = 60 * 60000;
-const INFORME_CADA = 2; // el informe (≈100 kB por día) cada 2 pasadas
+const INFORME_CADA = 5; // el informe (≈100 kB por día) cada 5 pasadas
 
 const hm = (d) => (d ? new Date(d).toLocaleTimeString('es-CL', { timeZone: 'America/Santiago', hour: '2-digit', minute: '2-digit' }) : '—');
 const aMs = (t) => (t?.toMillis ? t.toMillis() : typeof t === 'number' ? t : null);
@@ -60,6 +63,13 @@ async function anotarError(db, e) {
 }
 
 /// Carga para Firestore (claves cortas: el documento lleva ~200 por día).
+/// Firma de las cargas para saber si hay nuevas, sin importar el orden en que Dhemax las devuelve. Solo lo que
+/// no cambia: las cargas en curso vienen con fin = última lectura (cada ~5 min) y sf/kwh subiendo (visto el 24-11),
+/// así que eso no cuenta como cambio; los valores finales quedan en la escritura siguiente.
+const firma = (cargas) => Object.fromEntries(Object.keys(cargas).sort()
+  .map((k) => { const { p, ini, si, dia } = cargas[k]; return [k, JSON.stringify({ p, ini, si, dia })]; }));
+const distintas = (a, b) => new Set([...Object.keys(a), ...Object.keys(b)].filter((k) => a[k] !== b[k])).size;
+
 const cargaDoc = (c, ap) => ({
   p: c.pistola ?? `${c.cargador}/${c.manguera}`,
   ini: c.inicio ? c.inicio.getTime() : null,
@@ -98,7 +108,7 @@ export async function correrDhemax({ db = null, probar = false, cada = 60, minut
   const intervalos = [...(previo.medicion?.intervalos ?? [])].slice(-200); // segundos entre datos en vivo
   const atrasos = [...(previo.medicion?.atrasos ?? [])].slice(-200); // min entre fin de carga y aparición
   let enCurso = previo.medicion?.enCurso ?? 0;
-  let escrito = JSON.stringify({ cargas, vivo: soloEstado(vivo) });
+  let escrito = firma(cargas);
   let ultimaEscritura = aMs(previo.actualizado) ?? 0;
   let ultimoAviso = aMs(previo.avisoError) ?? 0;
   let primeraVez = Object.keys(cargas).length === 0; // sin historial: lo que ya está no cuenta como "nuevo"
@@ -184,11 +194,12 @@ export async function correrDhemax({ db = null, probar = false, cada = 60, minut
       }
     }
 
-    // Escritura: solo si cambió algo (máx. 1 cada 2 min) o control cada 10 min.
-    const ahoraTxt = JSON.stringify({ cargas, vivo: soloEstado(vivo) });
+    // Escritura: solo si hay cargas nuevas o cambiadas (máx. 1 cada 5 min) o control cada 30 min.
+    const ahoraFirma = firma(cargas);
+    const cambiadas = distintas(ahoraFirma, escrito);
     const desde = Date.now() - ultimaEscritura;
-    const motivo = ahoraTxt !== escrito && desde >= ESCRIBIR_MS ? 'cambió'
-      : desde >= CONTROL_MS ? 'control' : null;
+    const motivo = cambiadas > 0 && desde >= ESCRIBIR_MS ? `${cambiadas} cargas nuevas`
+      : desde >= GUARDAR_MS ? 'control' : null;
     const medicion = {
       atrasos: atrasos.slice(-200),
       intervalos: intervalos.slice(-200),
@@ -205,7 +216,14 @@ export async function correrDhemax({ db = null, probar = false, cada = 60, minut
         });
         escrituras++;
       }
-      escrito = ahoraTxt;
+      if (!escribe && cambiadas > 0 && cambiadas < 30) {
+        for (const k of Object.keys({ ...ahoraFirma, ...escrito }).filter((k) => ahoraFirma[k] !== escrito[k])) {
+          const [x, y] = [JSON.parse(escrito[k] ?? '{}'), JSON.parse(ahoraFirma[k] ?? '{}')];
+          const campos = Object.keys({ ...x, ...y }).filter((c) => JSON.stringify(x[c]) !== JSON.stringify(y[c]));
+          console.log(`   ~ ${y.p ?? x.p} tr ${k}: ` + campos.map((c) => `${c} ${c === 'ini' || c === 'fin' || c === 'ap' ? hm(x[c]) : x[c]}→${c === 'ini' || c === 'fin' || c === 'ap' ? hm(y[c]) : y[c]}`).join(', '));
+        }
+      }
+      escrito = ahoraFirma;
       ultimaEscritura = Date.now();
       console.log(`   ${escribe ? 'guardado' : '(probar: no guarda)'} dhemax/hoy (${motivo}) · ` +
         `aparecen ${medicion.atrasoMediano ?? '—'} min después de terminar (mediana de ${atrasos.length}) · ` +
@@ -228,11 +246,6 @@ export async function correrDhemax({ db = null, probar = false, cada = 60, minut
     await new Promise((r) => setTimeout(r, cada * 1000));
   }
   console.log(`Dhemax: ${n} pasadas, ${escrituras} escrituras${escribe ? '' : ' (--probar)'}.`);
-}
-
-/// Lo que cuenta como "cambio" del vivo: estado y error, y el SoC (no la hora del dato ni los kW).
-function soloEstado(vivo) {
-  return Object.fromEntries(Object.entries(vivo).map(([p, x]) => [p, [x?.estado, x?.error, x?.soc]]));
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
