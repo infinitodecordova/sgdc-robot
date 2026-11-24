@@ -510,7 +510,7 @@ function horaChileAhora() {
 
 // ------------------------------------------------------------ Respaldo: patio y digiCAR en vivo
 // El cron de GitHub se salta pasadas (el 13-11 el patio nocturno nunca arrancó). Cada 4 min el
-// vigilante pregunta a GitHub si marquesinas.yml, digicar.yml y planillon.yml tienen una corrida
+// vigilante pregunta a GitHub si marquesinas.yml, digicar.yml, planillon.yml y dhemax.yml tienen una corrida
 // andando o en cola (cada uno en su horario); si no, la lanza. No toca Firestore.
 // Necesita GH_TOKEN y GITHUB_REPOSITORY.
 function hmChileAhora(d = new Date()) {
@@ -536,6 +536,7 @@ const ROBOTS_EN_VIVO = [
   ['marquesinas.yml', enHorarioEnVivo],
   ['digicar.yml', enHorarioEnVivo],
   ['planillon.yml', enHorarioPlanillon],
+  ['dhemax.yml', () => true], // todo el día (las cargas son de día y de noche)
 ];
 
 async function github(ruta, opciones = {}) {
