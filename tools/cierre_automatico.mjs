@@ -18,7 +18,7 @@
 // Se apaga desde la app (config/cierreAuto.activo = false).
 
 import { chile, cambiosSgdc, jornadaDe, ultimoCierre, turnoManual, ETIQUETAS, fmt } from './auto_correccion.mjs';
-import { calzaFinal, cargasDhemaxEntre, emparejar, hayDhemax, PISTOLAS, textoCarga } from './dhemax_cruce.mjs';
+import { calzaFinal, cargasDhemaxEntre, emparejar, hayDhemax, marcarEnCurso, PISTOLAS, textoCarga } from './dhemax_cruce.mjs';
 
 const PERSISTENTES = new Set(['PT', 'AV', 'FS', 'PIEA', 'TSC']);
 // El Power BI se actualiza ~:27/:32. Para cerrar, sus datos tienen que llegar al menos hasta
@@ -212,10 +212,12 @@ export async function cierreAutomatico(db, cargas, datosSgdc) {
       // Ninguna carga en todo un turno es una respuesta vacía de Dhemax: se cierra como antes.
       if (!todasDh.length) throw new Error('Dhemax no trajo ninguna carga del turno');
       const deDhemax = todasDh.filter((c) => !corte || c.inicio > corte);
+      // Las que siguen cargando: su % final todavía no es el definitivo (no se corrige con él).
+      const enCurso = await marcarEnCurso(deDhemax);
       dh = emparejar(docs.map((x) => ({ id: x.id, ...x.data() })), deDhemax, sgdcParcial);
       for (const [id, r] of dh.porBus) if (r.estricta && r.carga) porDhemax.set(id, r.carga);
       console.log(`Cierre automático: SGDC atrasado → cargadores (Dhemax): ${deDhemax.length} cargas, ` +
-        `${porDhemax.size} buses que calzan sin duda.`);
+        `${porDhemax.size} buses que calzan sin duda${enCurso ? `, ${enCurso} siguen cargando (sin tocar su % final)` : ''}.`);
     } catch (e) {
       dh = null;
       console.log(`Cierre automático: Dhemax no respondió (${e.message}); se cierra con lo anotado.`);
@@ -393,14 +395,15 @@ export async function cierreAutomatico(db, cargas, datosSgdc) {
 
 /// Qué cambiarle a un bus para que calce con su carga del cargador (Dhemax). Solo se llama con cargas que
 /// calzan sin duda. % inicial si difiere en más de 2; % final si no calza (cerca del 100 Dhemax marca hasta 3
-/// menos: ahí se deja lo anotado); jornada por la hora de inicio si falta o es M/T/N y no calza.
+/// menos: ahí se deja lo anotado; si la carga sigue en curso, tampoco: su % final no es definitivo);
+/// jornada por la hora de inicio si falta o es M/T/N y no calza.
 export function cambiosDhemax(b, c) {
   const cambios = {};
   const poner = (k, v) => {
     if (v != null && b[k] !== v) cambios[k] = { antes: b[k] ?? null, despues: v };
   };
   if (b.pctInicial == null || Math.abs(b.pctInicial - c.si) > 2) poner('pctInicial', c.si);
-  if (b.pctFinal == null || !calzaFinal(b.pctFinal, c.sf)) poner('pctFinal', c.sf);
+  if (!c.enCurso && (b.pctFinal == null || !calzaFinal(b.pctFinal, c.sf))) poner('pctFinal', c.sf);
   const j = c.ini ? jornadaDe(new Date(c.ini)) : null;
   if (!b.jornada || (['M', 'T', 'N'].includes(b.jornada) && b.jornada !== j)) poner('jornada', j);
   return cambios;

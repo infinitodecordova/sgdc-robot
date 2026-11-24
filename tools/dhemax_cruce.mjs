@@ -11,6 +11,9 @@
 // el mismo bus reconectado: se juntan en una sola (primer % inicial → último % final, kWh sumados).
 // Los intentos fallidos (<1 kWh) no cuentan. Si un bus no tiene carga en su pistola y en otra hay una sin
 // anotar con su mismo % inicial, se sugiere que la pistola se anotó mal (SRPK75 20-11: A1-L → A2-L).
+// Cargas en curso: Dhemax ya las trae, con fin = última lectura del medidor (~cada 5 min) y sf/kwh subiendo
+// (visto el 24-11). marcarEnCurso() las marca con `enCurso` (pistola "Charging" en el vivo); su % final no es
+// definitivo y no se usa para corregir.
 // Ojo: cerca del 100 % Dhemax marca 1–3 puntos menos (el último SoC se lee antes del término); quien
 // compare % finales tiene que aceptarlo (calzaFinal).
 // Comprobado el 24-11-2026: 378/402 cargas del SGDC calzan con Dhemax (las 24 restantes eran de un día
@@ -44,7 +47,8 @@ const ms = (d) => (d == null ? null : d instanceof Date ? d.getTime() : d?.toDat
 // ------------------------------------------------------------------ descarga
 
 let sesion = null;
-const porDia = new Map(); // día de turno → Promise<cargas> (una descarga por día por corrida)
+const porDia = new Map(); // día de turno → { p: Promise<cargas>, t } (una descarga por día cada 5 min)
+const CACHE_MS = 5 * MIN; // el vigilante vive ~55 min: sin esto la revisión usaría lo bajado en el cierre
 
 /// ¿Hay usuario y clave de Dhemax en esta corrida?
 export const hayDhemax = () => !!(process.env.DHEMAX_USUARIO && process.env.DHEMAX_CLAVE);
@@ -57,20 +61,48 @@ export async function cargasDhemaxEntre(desde, hasta) {
   const a = ms(desde), b = ms(hasta);
   const dias = new Set([diaChile(new Date(a - 86400000)), diaChile(new Date(a)), diaChile(new Date(b))]);
   const listas = await Promise.all([...dias].map((d) => {
-    if (!porDia.has(d)) {
+    if (!porDia.has(d) || Date.now() - porDia.get(d).t > CACHE_MS) {
       const p = sesion.cargasDelDia(d);
       p.catch(() => porDia.delete(d)); // si falla, que se pueda reintentar
-      porDia.set(d, p);
+      porDia.set(d, { p, t: Date.now() });
     }
-    return porDia.get(d);
+    return porDia.get(d).p;
   }));
   const unicas = new Map();
   for (const c of listas.flat()) {
     const i = ms(c.inicio);
     if (c.tr == null || i == null || i < a || i >= b || !c.pistola) continue;
-    unicas.set(String(c.tr), c);
+    unicas.set(String(c.tr), { ...c }); // copia: marcarEnCurso no toca la caché
   }
   return [...unicas.values()].sort((x, y) => ms(x.inicio) - ms(y.inicio));
+}
+
+const EN_CURSO_SIN_VIVO_MIN = 10; // sin el vivo: en curso si la última lectura es de hace menos que esto
+
+/// Marca `enCurso` en las cargas que siguen cargando: la última de cada pistola que está "Charging" en el vivo.
+/// Si el vivo no responde, las que tienen la última lectura de hace menos de 10 min (por si acaso).
+/// Devuelve cuántas marcó. Solo hace falta cerca del fin del turno (cierre automático).
+export async function marcarEnCurso(cargas, ahora = Date.now()) {
+  let cargando = null;
+  try {
+    sesion ??= new SesionDhemax(process.env.DHEMAX_USUARIO, process.env.DHEMAX_CLAVE);
+    cargando = new Set((await sesion.enVivo()).filter((m) => m.pistola && /charg/i.test(m.estado ?? '')).map((m) => m.pistola));
+  } catch {
+    cargando = null;
+  }
+  const ultima = new Map();
+  for (const c of cargas) {
+    const u = ultima.get(c.pistola);
+    if (!u || ms(c.inicio) > ms(u.inicio)) ultima.set(c.pistola, c);
+  }
+  let n = 0;
+  for (const c of cargas) {
+    c.enCurso = cargando
+      ? cargando.has(c.pistola) && ultima.get(c.pistola) === c
+      : ms(c.fin ?? c.inicio) > ahora - EN_CURSO_SIN_VIVO_MIN * MIN;
+    if (c.enCurso) n++;
+  }
+  return n;
 }
 
 // ------------------------------------------------------------------ cruce
@@ -90,10 +122,11 @@ function sesiones(cargas) {
       u.kwh = Math.round(((u.kwh ?? 0) + (c.kwh ?? 0)) * 100) / 100;
       u.tr.push(c.tr);
       u.ppuSgdc ??= c.ppuSgdc ?? null;
+      u.enCurso = !!c.enCurso;
     } else {
       l.push({
         pistola: c.pistola, si: c.socIni, sf: c.socFin, kwh: c.kwh, ini: ms(c.inicio), fin: ms(c.fin),
-        tr: [c.tr], ppuSgdc: c.ppuSgdc ?? null,
+        tr: [c.tr], ppuSgdc: c.ppuSgdc ?? null, enCurso: !!c.enCurso,
       });
     }
     porPistola.set(c.pistola, l);
@@ -126,7 +159,7 @@ function duenosSgdc(dhemax, sgdc) {
  * @param sgdc cargas del SGDC del turno [{ ppu, pistola, inicio, fin }] (puede ir vacío si el SGDC cayó)
  * @returns { porBus: Map(id → resultado), sinAnotar: [sesión] }
  *   resultado = { estado: 'confirmada'|'probable'|'ambigua'|'sin_carga', estricta, carga, opciones }
- *   carga = { pistola, si, sf, kwh, ini, fin (ms), tr: [..], ppuSgdc }
+ *   carga = { pistola, si, sf, kwh, ini, fin (ms), tr: [..], ppuSgdc, enCurso }
  */
 export function emparejar(buses, dhemax, sgdc = []) {
   const ses = sesiones(duenosSgdc(dhemax.filter((c) => (c.kwh ?? 0) >= KWH_MIN), sgdc));
@@ -260,8 +293,8 @@ export function calzaFinal(anotado, cargador, tol = 2) {
 /// "B12-R 08:58–09:45 72→100 % 99,65 kWh" (para logs y avisos). [hm] formatea una fecha en hora de Chile.
 export function textoCarga(c, hm) {
   if (!c) return '—';
-  return `${c.pistola} ${hm(new Date(c.ini))}–${c.fin ? hm(new Date(c.fin)) : '…'} ${c.si ?? '—'}→${c.sf ?? '—'} %` +
-    `${c.kwh != null ? ` ${String(c.kwh).replace('.', ',')} kWh` : ''}`;
+  return `${c.pistola} ${hm(new Date(c.ini))}–${c.fin && !c.enCurso ? hm(new Date(c.fin)) : '…'} ${c.si ?? '—'}→${c.sf ?? '—'} %` +
+    `${c.kwh != null ? ` ${String(c.kwh).replace('.', ',')} kWh` : ''}${c.enCurso ? ' (sigue cargando)' : ''}`;
 }
 
 /// Resultado para guardar en Firestore (dhemaxTurnos/{turno}): lo que usa la app en "Cargas sin SGDC".
