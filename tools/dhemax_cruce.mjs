@@ -33,7 +33,10 @@ const KWH_MIN = 1; // menos que esto es un intento fallido (SRSC39 22-11: 1 min,
 export const OTRA_PISTOLA_PCT = 3; // % inicial para sugerir que la pistola se anotó mal
 export const PROBABLE_PCT = 5; // % inicial anotado vs el del cargador para "probable"
 export const ESTRICTO_PCT = 3; // para corregir sin preguntar (cierre automático)
-const AMBIGUO_PCT = 2; // si la segunda opción está a menos de esto de la mejor, es ambigua
+const AMBIGUO_PCT = 2; // si otro reparto calza a menos de esto del mejor y cambia una carga de dueño, es ambigua
+const PESO_FINAL = 0.5; // el % final pesa la mitad (a veces se anota la meta), y como máximo 10 puntos
+const SIN_CARGA = 12; // costo de dejar un bus sin carga: siempre conviene asignar una que calce
+const MAX_REPARTOS = 20000;
 
 const norma = (p) => String(p ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 const ms = (d) => (d == null ? null : d instanceof Date ? d.getTime() : d?.toDate ? d.toDate().getTime() : Number(d));
@@ -145,39 +148,80 @@ export function emparejar(buses, dhemax, sgdc = []) {
     porBus.set(b.id ?? ppu, { estado: 'confirmada', estricta, carga: c, opciones: [c] });
   }
 
-  // 2. Las demás por % inicial, de la que calza mejor a la peor (así dos buses no se llevan la misma carga).
-  //    Solo cargas sin dueño en el SGDC o con un dueño que no está anotado en esa pistola (patente mal digitada).
+  // 2. Las demás, pistola por pistola: el reparto de sus cargas libres entre sus buses que mejor calza en
+  //    conjunto (% inicial y, con menos peso, % final; así 60→89 y 59→85 no se cruzan como el 09-11 en B11-L).
+  //    Si otro reparto calza casi igual de bien (a menos de AMBIGUO_PCT) y cambia de dueño una carga, esos buses
+  //    quedan "ambigua": no se adivina. Solo cargas sin dueño en el SGDC o con un dueño que no está anotado
+  //    (patente mal digitada).
   const libre = (s) => !usadas.has(s) && (!s.ppuSgdc || !ppus.has(s.ppuSgdc));
-  const pares = [];
+  //    Los buses sin % inicial anotado no entran al reparto (le quitarían la certeza a los demás, 08-11): van
+  //    al final y solo se quedan con una carga si es la única que sobra en su pistola.
+  const porPistola = new Map();
+  const sinInicial = [];
   for (const b of conPistola) {
     if (porBus.has(b.id ?? norma(b.ppu))) continue;
-    for (const s of ses.filter((x) => x.pistola === b.coordenada && libre(x))) {
-      const d = b.pctInicial != null && s.si != null ? Math.abs(s.si - b.pctInicial) : null;
-      pares.push({ b, s, d });
+    if (b.pctInicial == null) {
+      sinInicial.push(b);
+      continue;
     }
+    if (!porPistola.has(b.coordenada)) porPistola.set(b.coordenada, []);
+    porPistola.get(b.coordenada).push(b);
   }
-  pares.sort((x, y) => (x.d ?? 99) - (y.d ?? 99));
-  for (const { b, s, d } of pares) {
-    const id = b.id ?? norma(b.ppu);
-    if (porBus.has(id) || usadas.has(s)) continue;
-    const opciones = pares.filter((p) => p.b === b && !usadas.has(p.s));
-    const otras = opciones.filter((p) => p.s !== s);
-    if (d == null) {
-      // Sin % inicial anotado: solo si hay una única carga posible en esa pistola.
-      if (opciones.length === 1) {
-        usadas.add(s);
-        porBus.set(id, { estado: 'probable', estricta: false, carga: s, opciones: [s] });
+  for (const [pistola, bs] of porPistola) {
+    const cand = ses.filter((x) => x.pistola === pistola && libre(x));
+    if (!cand.length) continue;
+    const costo = (b, x) => {
+      if (x.si == null) return null;
+      let c = Math.abs(x.si - b.pctInicial);
+      if (c > PROBABLE_PCT) return null;
+      if (b.pctFinal != null && x.sf != null) c += PESO_FINAL * Math.min(Math.abs(x.sf - b.pctFinal), 10);
+      return c;
+    };
+    // Todos los repartos posibles (cada bus: una carga distinta o ninguna). Son pocos: ≤4 buses y ≤6 cargas.
+    const repartos = [];
+    const rec = (i, tomadas, total, asig) => {
+      if (repartos.length >= MAX_REPARTOS) return;
+      if (i === bs.length) {
+        repartos.push({ total, asig });
+        return;
       }
-      continue;
+      rec(i + 1, tomadas, total + SIN_CARGA, [...asig, null]);
+      for (const x of cand) {
+        if (tomadas.has(x)) continue;
+        const c = costo(bs[i], x);
+        if (c == null) continue;
+        tomadas.add(x);
+        rec(i + 1, tomadas, total + c, [...asig, x]);
+        tomadas.delete(x);
+      }
+    };
+    rec(0, new Set(), 0, []);
+    repartos.sort((a, z) => a.total - z.total);
+    const mejor = repartos[0];
+    const cerca = repartos.filter((r) => r.total < mejor.total + AMBIGUO_PCT);
+    bs.forEach((b, i) => {
+      const x = mejor.asig[i];
+      if (!x) return;
+      // ¿Hay un reparto casi igual de bueno en que este bus se lleva otra carga, o esta carga va a otro bus?
+      const otras = new Set(cerca.map((r) => r.asig[i]).filter((y) => y && y !== x));
+      const duenos = new Set(cerca.map((r) => r.asig.indexOf(x)).filter((k) => k >= 0));
+      const id = b.id ?? norma(b.ppu);
+      if (otras.size || duenos.size > 1) {
+        porBus.set(id, { estado: 'ambigua', estricta: false, carga: null, opciones: [x, ...otras] });
+        return;
+      }
+      usadas.add(x);
+      porBus.set(id, { estado: 'probable', estricta: Math.abs(x.si - b.pctInicial) <= ESTRICTO_PCT, carga: x, opciones: [x] });
+    });
+  }
+  // Sin % inicial: solo si en su pistola sobra una única carga libre (y ningún otro bus sin % la pide).
+  for (const b of sinInicial) {
+    const libres = ses.filter((x) => x.pistola === b.coordenada && libre(x));
+    const otros = sinInicial.filter((y) => y !== b && y.coordenada === b.coordenada);
+    if (libres.length === 1 && !otros.length) {
+      usadas.add(libres[0]);
+      porBus.set(b.id ?? norma(b.ppu), { estado: 'probable', estricta: false, carga: libres[0], opciones: [libres[0]] });
     }
-    if (d > PROBABLE_PCT) continue;
-    const empate = otras.some((p) => p.d != null && p.d - d < AMBIGUO_PCT);
-    if (empate) {
-      porBus.set(id, { estado: 'ambigua', estricta: false, carga: null, opciones: opciones.filter((p) => p.d != null && p.d <= PROBABLE_PCT).map((p) => p.s) });
-      continue;
-    }
-    usadas.add(s);
-    porBus.set(id, { estado: 'probable', estricta: d <= ESTRICTO_PCT, carga: s, opciones: [s] });
   }
 
   for (const b of conPistola) {
