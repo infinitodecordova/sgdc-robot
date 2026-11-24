@@ -9,6 +9,9 @@
 //      pistola calzan casi igual de bien, queda "ambigua" y no se usa para corregir.
 // Cargas seguidas en la misma pistola (la siguiente parte a <45 min y en el % donde quedó la anterior) son
 // el mismo bus reconectado: se juntan en una sola (primer % inicial → último % final, kWh sumados).
+// Carga continuada en otra pistola (SRRW73 20-11: B11-R 80→84 y, por una falla, terminó en B9-L 84→99): si el %
+// final anotado no calza con su carga y hay UNA carga sin dueño que parte <90 min después, en el % donde quedó (±2)
+// y termina en el % anotado, se juntan (continuadas).
 // Los intentos fallidos (<1 kWh) no cuentan. Si un bus no tiene carga en su pistola y en otra hay una sin
 // anotar con su mismo % inicial, se sugiere que la pistola se anotó mal (SRPK75 20-11: A1-L → A2-L).
 // Cargas en curso: Dhemax ya las trae, con fin = última lectura del medidor (~cada 5 min) y sf/kwh subiendo
@@ -32,6 +35,8 @@ const DUENO_FIN_MIN = 5; // SGDC y Dhemax terminan casi al mismo segundo (median
 const DUENO_INICIO_MIN = 20; // el SGDC a veces parte varios minutos tarde
 const RECONEXION_MIN = 45; // hueco máximo entre dos cargas del mismo bus en la misma pistola (SRPK28 19-11: 25 min)
 const RECONEXION_PCT = 5; // la siguiente parte en el % donde quedó la anterior (±; el último SoC llega atrasado)
+const CONTINUA_MIN = 90; // carga continuada en otra pistola: parte a menos de esto del fin de la anterior
+const CONTINUA_PCT = 2; // … en el % donde quedó la anterior (±)
 const KWH_MIN = 1; // menos que esto es un intento fallido (SRSC39 22-11: 1 min, 0 kWh): no cuenta como carga
 export const OTRA_PISTOLA_PCT = 3; // % inicial para sugerir que la pistola se anotó mal
 export const PROBABLE_PCT = 5; // % inicial anotado vs el del cargador para "probable"
@@ -157,7 +162,7 @@ function duenosSgdc(dhemax, sgdc) {
  * @param buses [{ id, ppu, coordenada, pctInicial, pctFinal }] (la foto del turno o el semáforo)
  * @param dhemax cargas de Dhemax del turno (de cargasDhemaxEntre)
  * @param sgdc cargas del SGDC del turno [{ ppu, pistola, inicio, fin }] (puede ir vacío si el SGDC cayó)
- * @returns { porBus: Map(id → resultado), sinAnotar: [sesión] }
+ * @returns { porBus: Map(id → resultado), sinAnotar: [sesión], continuadas: [texto] }
  *   resultado = { estado: 'confirmada'|'probable'|'ambigua'|'sin_carga', estricta, carga, opciones }
  *   carga = { pistola, si, sf, kwh, ini, fin (ms), tr: [..], ppuSgdc, enCurso }
  */
@@ -262,6 +267,29 @@ export function emparejar(buses, dhemax, sgdc = []) {
     if (!porBus.has(id)) porBus.set(id, { estado: 'sin_carga', estricta: false, carga: null, opciones: [] });
   }
 
+  // 2b. Carga continuada en otra pistola: el % final anotado no calza con su carga, pero sí con una sin dueño que
+  //     parte poco después justo donde quedó la suya. Solo si hay una única candidata.
+  const continuadas = [];
+  const enAmbiguas0 = new Set([...porBus.values()].flatMap((r) => (r.estado === 'ambigua' ? r.opciones : [])));
+  for (const b of conPistola) {
+    const id = b.id ?? norma(b.ppu);
+    const r = porBus.get(id);
+    const c = r?.carga;
+    if (!c || b.pctFinal == null || c.sf == null || c.fin == null || calzaFinal(b.pctFinal, c.sf)) continue;
+    const cand = ses.filter((x) => libre(x) && !enAmbiguas0.has(x) && x !== c && x.ini != null && x.si != null &&
+      x.ini > c.fin && x.ini - c.fin <= CONTINUA_MIN * MIN && Math.abs(x.si - c.sf) <= CONTINUA_PCT &&
+      calzaFinal(b.pctFinal, x.sf));
+    if (cand.length !== 1) continue;
+    const x = cand[0];
+    usadas.add(x);
+    const junta = {
+      ...c, sf: x.sf, fin: x.fin, kwh: Math.round(((c.kwh ?? 0) + (x.kwh ?? 0)) * 100) / 100,
+      tr: [...c.tr, ...x.tr], continuaEn: x.pistola, enCurso: !!x.enCurso,
+    };
+    porBus.set(id, { ...r, carga: junta, opciones: [junta] });
+    continuadas.push(`${norma(b.ppu ?? b.id)}: ${c.pistola} ${c.si}→${c.sf} % y siguió en ${x.pistola} ${x.si}→${x.sf} %`);
+  }
+
   // 3. Cargas que no son de ningún bus anotado ni tienen patente en el SGDC: alguien cargó y no quedó anotado.
   //    (Las que el SGDC sí tiene las revisa la revisión de turnos con la patente.) Solo cargas de verdad.
   const enAmbiguas = new Set([...porBus.values()].flatMap((r) => (r.estado === 'ambigua' ? r.opciones : [])));
@@ -279,7 +307,7 @@ export function emparejar(buses, dhemax, sgdc = []) {
   }
   const sugeridas = new Set([...porBus.values()].map((r) => r.otraPistola).filter(Boolean));
   sinAnotar = sinAnotar.filter((s) => !sugeridas.has(s));
-  return { porBus, sinAnotar };
+  return { porBus, sinAnotar, continuadas };
 }
 
 /// ¿El % final anotado calza con el del cargador? ±tol, y cerca del 100 % hasta 3 puntos más (Dhemax lee el
@@ -299,7 +327,10 @@ export function textoCarga(c, hm) {
 
 /// Resultado para guardar en Firestore (dhemaxTurnos/{turno}): lo que usa la app en "Cargas sin SGDC".
 export function paraFirestore({ porBus, sinAnotar }) {
-  const c = (s) => (s ? { p: s.pistola, si: s.si, sf: s.sf, kwh: s.kwh, ini: s.ini, fin: s.fin, tr: s.tr, ppuSgdc: s.ppuSgdc } : null);
+  const c = (s) => (s ? {
+    p: s.pistola, si: s.si, sf: s.sf, kwh: s.kwh, ini: s.ini, fin: s.fin, tr: s.tr, ppuSgdc: s.ppuSgdc,
+    ...(s.continuaEn ? { pc: s.continuaEn } : {}),
+  } : null);
   return {
     buses: Object.fromEntries([...porBus].map(([id, r]) => [id, {
       estado: r.estado, estricta: r.estricta, carga: c(r.carga), opciones: r.opciones.slice(0, 4).map(c),

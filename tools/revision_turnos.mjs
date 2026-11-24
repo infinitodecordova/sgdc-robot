@@ -327,6 +327,7 @@ export async function revisarTurnos(db, cargas, datosSgdc, { probar = false, des
       `${problemas.length ? `${problemas.length} a revisar` : 'todo cuadra'}.`);
     for (const p of problemas) console.log('   ', p);
     for (const p of info.erroresSgdc) console.log('    (error del SGDC, no cuenta)', p);
+    for (const p of dh?.continuadas ?? []) console.log('    (carga continuada en otra pistola)', p);
     if (info.cortas.length) console.log(`    cargas cortas del SGDC sin anotar (no cuentan): ${info.cortas.join(' · ')}`);
     if (sinPatio.length) console.log(`    anotadas sin patio en vivo (no se acusan): ${sinPatio.join(' · ')}`);
     for (const x of sugerencias) console.log(`    sugerencia: carga de ${x.pistola} ${x.de} → ${x.a} (${x.kwh ?? '—'} kWh)`);
