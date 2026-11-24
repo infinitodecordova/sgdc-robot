@@ -5,7 +5,8 @@
 //   node revisar_con_dhemax.mjs --desde 2026-11-01 --hasta 2026-11-23            con la API (pide usuario y clave)
 //   node revisar_con_dhemax.mjs --desde 2026-11-19 --excel ~/Descargas            con los Excel de Dhemax
 //   node revisar_con_dhemax.mjs ... --detalle                                     lista cada problema
-//   node revisar_con_dhemax.mjs ... --guardar                                     guarda dhemaxTurnos/<turno>
+//   node revisar_con_dhemax.mjs ... --guardar                                     guarda dhemaxTurnos/<turno> y
+//                                                                                 turnos/<turno>.verificacion
 //                                                                                 (solo con la API: lo usa la app)
 // También corre en GitHub Actions con los secretos del repo (workflow revisar_dhemax.yml, a mano).
 // Lecturas de Firestore: los turnos del rango + el resumen del mes del SGDC (sgdcMes, 1 por mes).
@@ -140,6 +141,15 @@ for (const t of turnos) {
       turnoId: t.id, dia: t.dia, turno: t.turno, calculado: admin.firestore.FieldValue.serverTimestamp(), ...paraFirestore(dh),
     });
     guardados++;
+  }
+  // Resultado en el turno (✓✓ / ✓ / ⚠ N en el historial de la app). Con datos del SGDC o de los cargadores.
+  if (GUARDAR && !EXCEL && (dh || sgdc.length)) {
+    await db.doc(`turnos/${t.id}`).update({
+      verificacion: {
+        sgdc: sgdc.length > 0, cargadores: !!dh, problemas: despues.length, confirmadas: info.confirmadas.length,
+        revisado: admin.firestore.FieldValue.serverTimestamp(),
+      },
+    });
   }
 }
 console.log(`\nTotal: la revisión solo con el SGDC acusaba ${tot.antes}; con los cargadores quedan ${tot.despues}.`);

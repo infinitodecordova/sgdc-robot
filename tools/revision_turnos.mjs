@@ -23,7 +23,7 @@
 //   - El cruce se guarda en dhemaxTurnos/<id del turno> (lo usa la app en "Cargas sin SGDC").
 //   Si Dhemax no responde, se revisa como antes, solo con el SGDC.
 // Cada turno se revisa una sola vez (candado en privado/revision_<id del turno>).
-// No cambia nada del turno: solo avisa. Lecturas: ~3 turnos + ~6 candados por pasada y, una vez por
+// No cambia lo anotado: solo avisa y deja el resultado en turnos/<id>.verificacion (lo muestra el historial). Lecturas: ~3 turnos + ~6 candados por pasada y, una vez por
 // turno, sus cargas del SGDC (~40–80).
 
 import { Timestamp, FieldValue } from 'firebase-admin/firestore';
@@ -330,6 +330,13 @@ export async function revisarTurnos(db, cargas, datosSgdc, { probar = false, des
       if (e.code === 6 || /already exists/i.test(e.message)) continue;
       throw e;
     }
+    // Resultado en el mismo turno: el historial de la app muestra ✓✓ / ✓ / ⚠ N sin leer nada más.
+    await db.collection('turnos').doc(d.id).update({
+      verificacion: {
+        sgdc: !soloCargadores, cargadores: !!dh, problemas: problemas.length,
+        confirmadas: info.confirmadas.length, revisado: FieldValue.serverTimestamp(),
+      },
+    });
     if (!problemas.length) continue;
     const contra = dh ? 'el SGDC ni con los cargadores' : 'el SGDC';
     await db.collection('errores').doc(`revision_${dia}_${t.turno}`).set({
