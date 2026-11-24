@@ -41,6 +41,7 @@ const ESPERA_SGDC_H = 4;
 const ESPERA_DHEMAX_MIN = 30;
 const SUBE = 2; // puntos: % final que supera al inicial en más que esto = se anotó como cargado
 const TOLERANCIA = 2; // puntos: diferencia aceptada entre el % final anotado y el del SGDC
+const CORTA_PCT = 2; // carga del SGDC sin anotar que sube esto o menos: no cuenta como problema
 const PISTOLAS = new Set([
   'B7-L', 'B7-R', 'B8-L', 'B8-R', 'B9-L', 'B9-R', 'B10-L', 'B10-R', 'B11-L', 'B11-R',
   'B12-L', 'B12-R', 'B13-L', 'B13-R', 'A1-L', 'A1-R', 'A2-L', 'A2-R', 'A3-L', 'A3-R',
@@ -95,6 +96,7 @@ export function cortesSgdc(cargas) {
 export function problemasTurno(t, cargas, sugerencias = [], sinPatio = [], dh = null, info = {}) {
   info.confirmadas ??= [];
   info.erroresSgdc ??= [];
+  info.cortas ??= [];
   const porBus = new Map();
   for (const c of cargas) {
     const p = norma(c.ppu);
@@ -207,6 +209,12 @@ export function problemasTurno(t, cargas, sugerencias = [], sinPatio = [], dh = 
     if (l.length && !conPistola && b.pctFinal == null && b.jornada !== 'NI') {
       const u = l[l.length - 1];
       const f = aFecha(u.inicio ?? u.reserva);
+      // Pasada corta (sube 2 puntos o menos, SRSC39 21-11: 76→78, 9,7 kWh): no cambia nada para operaciones.
+      const subeSgdc = l[0].socInicio != null && u.socFin != null ? u.socFin - l[0].socInicio : null;
+      if (subeSgdc != null && subeSgdc <= CORTA_PCT) {
+        info.cortas.push(`${ppu} (${u.pistola ?? '—'}, ${pct(l[0].socInicio, u.socFin)}${f ? `, ${hm(f)}` : ''})`);
+        continue;
+      }
       out.push(`${ppu}: el SGDC tiene carga (${u.pistola ?? '—'}, ${pct(l[0].socInicio, u.socFin)}` +
         `${f ? `, ${hm(f)}` : ''}) y en el turno no quedó anotada.`);
     }
@@ -319,6 +327,7 @@ export async function revisarTurnos(db, cargas, datosSgdc, { probar = false, des
       `${problemas.length ? `${problemas.length} a revisar` : 'todo cuadra'}.`);
     for (const p of problemas) console.log('   ', p);
     for (const p of info.erroresSgdc) console.log('    (error del SGDC, no cuenta)', p);
+    if (info.cortas.length) console.log(`    cargas cortas del SGDC sin anotar (no cuentan): ${info.cortas.join(' · ')}`);
     if (sinPatio.length) console.log(`    anotadas sin patio en vivo (no se acusan): ${sinPatio.join(' · ')}`);
     for (const x of sugerencias) console.log(`    sugerencia: carga de ${x.pistola} ${x.de} → ${x.a} (${x.kwh ?? '—'} kWh)`);
     if (probar) continue;
