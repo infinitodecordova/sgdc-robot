@@ -11,6 +11,9 @@
 //   - informe de cargas del día de turno de ayer y de hoy cada 2 pasadas.
 // Escribe dhemax/hoy SOLO si cambió algo, máximo 1 vez cada 2 min, más un control cada 10 min.
 // dhemax/hoy = { actualizado, ok, error, dias, cargas: { tr: {...} }, vivo: { pistola: {...} }, medicion }
+// Además un control chico en config/dhemax (lo escucha la app para la tira de robots, sin leer dhemax/hoy):
+// { ultimaSync, ok, error, cargando, cargas, medicion: {atraso, intervalo, enCurso, n} }, cada 10 min o si
+// cambia ok.
 // Medición (primeros días, para decidir el ritmo): cuántos minutos después de terminar aparece cada carga
 // (`ap` = cuándo la vio el robot por primera vez), si aparecen en curso, y cada cuánto cambia el dato en vivo.
 // Si falla: sigue intentando en la pasada siguiente; avisa en ERRORES máximo 1 vez por hora (las fallas de red
@@ -102,6 +105,14 @@ export async function correrDhemax({ db = null, probar = false, cada = 60, minut
   let ok = true;
   let error = null;
   let escrituras = 0;
+  let ultimoControl = 0;
+  let okControl = null;
+  const control = async (datos) => {
+    if (!escribe) return;
+    await db.doc('config/dhemax').set({ ...datos, ultimaSync: FS.FieldValue.serverTimestamp() });
+    ultimoControl = Date.now();
+    okControl = datos.ok;
+  };
   let n = 0;
 
   for (;;) {
@@ -167,6 +178,7 @@ export async function correrDhemax({ db = null, probar = false, cada = 60, minut
       if (loginRechazado && escribe) {
         await ref.set({ ok: false, error, pausaHasta: FS.Timestamp.fromMillis(Date.now() + PAUSA_LOGIN_MS),
           avisoError: FS.Timestamp.fromMillis(ultimoAviso), actualizado: FS.FieldValue.serverTimestamp() }, { merge: true });
+        await control({ ok: false, error: `${error} (en pausa 1 h)`, cargando: 0, cargas: Object.keys(cargas).length, medicion: null });
         console.log('Dhemax: rechazó el login; pausa 1 h para no bloquear la cuenta.');
         return;
       }
@@ -198,6 +210,16 @@ export async function correrDhemax({ db = null, probar = false, cada = 60, minut
       console.log(`   ${escribe ? 'guardado' : '(probar: no guarda)'} dhemax/hoy (${motivo}) · ` +
         `aparecen ${medicion.atrasoMediano ?? '—'} min después de terminar (mediana de ${atrasos.length}) · ` +
         `en curso: ${enCurso} · dato en vivo cada ${medicion.intervaloMediano ?? '—'} s (mediana de ${intervalos.length})`);
+    }
+
+    // Control chico para la app: cada 10 min o si cambió ok.
+    if (Date.now() - ultimoControl >= CONTROL_MS || okControl !== ok) {
+      await control({
+        ok, error,
+        cargando: Object.values(vivo).filter((x) => /charg/i.test(x?.estado ?? '')).length,
+        cargas: Object.keys(cargas).length,
+        medicion: { atraso: medicion.atrasoMediano, intervalo: medicion.intervaloMediano, enCurso, n: atrasos.length },
+      });
     }
 
     n++;
