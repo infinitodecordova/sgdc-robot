@@ -33,7 +33,7 @@ export function turnoDe(d) {
 }
 
 /// Jornada según la hora de inicio de la carga: 08:30–11:59 M, 12:00–18:00 T, resto N.
-function jornadaDe(d) {
+export function jornadaDe(d) {
   const { hm } = chile(d);
   if (hm >= 830 && hm < 1200) return 'M';
   if (hm >= 1200 && hm <= 1800) return 'T';

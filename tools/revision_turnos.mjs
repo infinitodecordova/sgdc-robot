@@ -14,18 +14,31 @@
 //      No se revisa el % de las cargas cortadas por una caída del SGDC (ver `cortesSgdc`).
 // Los buses que la app marcó `sinPatio` (carga anotada con el patio sin datos en vivo) no se acusan por
 // faltar en el SGDC ni por el % final: esas cargas no quedan en el sistema. Se listan aparte, como dato.
+// Con los cargadores (Dhemax, dhemax_cruce.mjs) como árbitro, si hay DHEMAX_USUARIO/DHEMAX_CLAVE:
+//   - Una carga que el SGDC no tiene pero el cargador sí (misma pistola, % inicial parecido o patente del
+//     SGDC) queda confirmada: solo se avisa si el % final anotado no calza con el del cargador.
+//   - Si el SGDC y el bombero no coinciden, manda el cargador (el SGDC se corta o parte tarde).
+//   - 7. El cargador hizo una carga que nadie anotó y que el SGDC tampoco tiene.
+//   - Si el SGDC no cubre el turno después de ESPERA_SGDC_H, se revisa solo con los cargadores.
+//   - El cruce se guarda en dhemaxTurnos/<id del turno> (lo usa la app en "Cargas sin SGDC").
+//   Si Dhemax no responde, se revisa como antes, solo con el SGDC.
 // Cada turno se revisa una sola vez (candado en privado/revision_<id del turno>).
-// No cambia nada del turno: solo avisa. Lecturas: ~3 turnos + ~3 candados por pasada y, una vez por
+// No cambia nada del turno: solo avisa. Lecturas: ~3 turnos + ~6 candados por pasada y, una vez por
 // turno, sus cargas del SGDC (~40–80).
 
 import { Timestamp, FieldValue } from 'firebase-admin/firestore';
 import { chile } from './auto_correccion.mjs';
 import { ventana } from './cierre_automatico.mjs';
+import { calzaFinal, cargasDhemaxEntre, emparejar, hayDhemax, paraFirestore, textoCarga } from './dhemax_cruce.mjs';
 
 // El SGDC tiene que llegar al menos hasta 20 min después del fin del turno (cargas que terminan tarde).
 const MARGEN_FIN_MIN = 20;
 // Solo turnos cerrados en las últimas 36 h (después de eso ya no se espera más al SGDC).
 const VENTANA_H = 36;
+// Si el SGDC no cubre el turno después de estas horas, se revisa solo con los cargadores (Dhemax).
+const ESPERA_SGDC_H = 4;
+// El cruce con los cargadores se guarda (dhemaxTurnos) cuando el turno terminó hace al menos esto.
+const ESPERA_DHEMAX_MIN = 30;
 const SUBE = 2; // puntos: % final que supera al inicial en más que esto = se anotó como cargado
 const TOLERANCIA = 2; // puntos: diferencia aceptada entre el % final anotado y el del SGDC
 const PISTOLAS = new Set([
@@ -74,7 +87,12 @@ export function cortesSgdc(cargas) {
 /// Problemas de un turno (lista de textos). Exportada para probarla sin Firestore.
 /// [sugerencias]: se le agregan las patentes mal digitadas que la app puede corregir con un toque
 /// ({ pistola, de, a, inicio, kwh, soh, socInicio, socFin }).
-export function problemasTurno(t, cargas, sugerencias = [], sinPatio = []) {
+/**
+ * @param dh cruce con los cargadores (emparejar() de dhemax_cruce.mjs) o null si Dhemax no está disponible.
+ * @param info se llena con { confirmadas: [ppu] } (cargas que el SGDC no tenía y el cargador sí, bien anotadas).
+ */
+export function problemasTurno(t, cargas, sugerencias = [], sinPatio = [], dh = null, info = {}) {
+  info.confirmadas ??= [];
   const porBus = new Map();
   for (const c of cargas) {
     const p = norma(c.ppu);
@@ -113,6 +131,10 @@ export function problemasTurno(t, cargas, sugerencias = [], sinPatio = []) {
     const sube = b.pctInicial != null && b.pctFinal != null && b.pctFinal > b.pctInicial + SUBE;
     const anotadoCargado = conPistola || sube;
     const como = `${conPistola ? `${b.coordenada}, ` : ''}${pct(b.pctInicial, b.pctFinal)}`;
+    // Lo que dice el cargador (Dhemax) de este bus: la carga real si calza sin dudas.
+    const m = dh?.porBus.get(b.id ?? ppu) ?? null;
+    const real = m && (m.estado === 'confirmada' || m.estado === 'probable') ? m.carga : null;
+    const difiere = (v, w) => v != null && w != null && Math.abs(v - w) > TOLERANCIA;
     if (anotadoCargado && !l.length) {
       // ¿Hay una carga doble en su misma pistola? Esa es probablemente la suya.
       const d = conPistola && dobles.find((x) => x.c.pistola === b.coordenada && !explicadas.has(x.c));
@@ -129,8 +151,29 @@ export function problemasTurno(t, cargas, sugerencias = [], sinPatio = []) {
           'digitó mal en el cargador. Lo anotado está bien; el error es del SGDC.');
         continue;
       }
-      if (b.sinPatio === true) sinPatio.push(`${ppu} (${como})`);
-      else out.push(`${ppu}: anotado como cargado (${como}) y el SGDC no tiene ninguna carga suya en el turno.`);
+      if (real) {
+        // El SGDC no la tiene pero el cargador sí: solo importa que el % final calce.
+        if (!calzaFinal(b.pctFinal, real.sf, TOLERANCIA)) {
+          out.push(`${ppu}: anotado con ${b.pctFinal} % final y el cargador dice ${real.sf} % ` +
+            `(${textoCarga(real, hm)}; el SGDC no tiene la carga).`);
+        } else {
+          info.confirmadas.push(ppu);
+        }
+      } else if (m?.estado === 'ambigua') {
+        out.push(`${ppu}: anotado como cargado (${como}); el SGDC no tiene la carga y en el cargador ` +
+          `${b.coordenada} hay ${m.opciones.length} que podrían ser suyas: ${m.opciones.map((x) => textoCarga(x, hm)).join(' · ')}.`);
+      } else if (m?.otraPistola) {
+        out.push(`${ppu}: anotado como cargado (${como}), pero el cargador ${b.coordenada} no tiene una carga que ` +
+          `calce y en ${m.otraPistola.pistola} hay una sin anotar con el mismo % inicial ` +
+          `(${textoCarga(m.otraPistola, hm)}): ¿se anotó mal la pistola?`);
+      } else if (dh && conPistola) {
+        out.push(`${ppu}: anotado como cargado (${como}) y ni el SGDC ni el cargador (Dhemax) tienen una carga ` +
+          `que calce en ${b.coordenada}.`);
+      } else if (b.sinPatio === true) {
+        sinPatio.push(`${ppu} (${como})`);
+      } else {
+        out.push(`${ppu}: anotado como cargado (${como}) y el SGDC no tiene ninguna carga suya en el turno.`);
+      }
     }
     if (b.jornada === 'NI' && anotadoCargado) {
       out.push(`${ppu}: marcado NI (no ingresado a carga) pero tiene ${como}.`);
@@ -141,7 +184,16 @@ export function problemasTurno(t, cargas, sugerencias = [], sinPatio = []) {
         `${[...new Set(l.map((c) => c.pistola ?? '—'))].join(', ')}.`);
     }
     const ultima = l[l.length - 1];
-    if (ultima?.estado === 'Finalizada' && ultima.socFin != null && !cortadas.has(ultima) && b.pctFinal != null &&
+    if (l.length && real) {
+      // Si el bombero coincide con el SGDC (finalizada, no cortada), está bien. Si no, manda el cargador: el
+      // SGDC puede haberse cortado o haber partido tarde.
+      const sgdcSirve = ultima?.estado === 'Finalizada' && ultima.socFin != null && !cortadas.has(ultima);
+      const conSgdc = sgdcSirve && !difiere(b.pctFinal, ultima.socFin);
+      if (!conSgdc && !calzaFinal(b.pctFinal, real.sf, TOLERANCIA)) {
+        out.push(`${ppu}: anotado con ${b.pctFinal} % final y el cargador dice ${real.sf} % (${textoCarga(real, hm)}` +
+          `${ultima?.socFin != null && ultima.socFin !== real.sf ? `; el SGDC dice ${ultima.socFin} %` : ''}).`);
+      }
+    } else if (ultima?.estado === 'Finalizada' && ultima.socFin != null && !cortadas.has(ultima) && b.pctFinal != null &&
         Math.abs(b.pctFinal - ultima.socFin) > TOLERANCIA) {
       if (b.sinPatio === true) {
         sinPatio.push(`${ppu} (anotado ${b.pctFinal} % final, el SGDC alcanzó a registrar ${ultima.socFin} %)`);
@@ -156,6 +208,11 @@ export function problemasTurno(t, cargas, sugerencias = [], sinPatio = []) {
       out.push(`${ppu}: el SGDC tiene carga (${u.pistola ?? '—'}, ${pct(l[0].socInicio, u.socFin)}` +
         `${f ? `, ${hm(f)}` : ''}) y en el turno no quedó anotada.`);
     }
+  }
+  // Cargas del cargador que no son de ningún bus anotado y que el SGDC tampoco tiene.
+  for (const s of dh?.sinAnotar ?? []) {
+    out.push(`Cargador ${s.pistola}: cargó ${textoCarga(s, hm)} y no quedó anotado ningún bus ` +
+      '(el SGDC tampoco tiene la carga).');
   }
   // Cargas dobles que ningún bus anotado explica: igual se avisan (una es de otro bus).
   const avisadas = new Set();
@@ -185,7 +242,6 @@ export function problemasTurno(t, cargas, sugerencias = [], sinPatio = []) {
  * @param probar true = solo muestra, no escribe
  */
 export async function revisarTurnos(db, cargas, datosSgdc, { probar = false, desdeH = VENTANA_H } = {}) {
-  if (!datosSgdc) return;
   const ahora = new Date();
   const s = await db.collection('turnos')
     .where('cerradoEn', '>=', Timestamp.fromDate(new Date(ahora.getTime() - desdeH * 3600 * 1000))).get();
@@ -195,14 +251,24 @@ export async function revisarTurnos(db, cargas, datosSgdc, { probar = false, des
     const dia = t.dia.replace(/-/g, '');
     const [desde, hasta] = ventana(t.turno, dia);
     const titulo = `${nombre(t.turno)} del ${+dia.slice(6, 8)}/${+dia.slice(4, 6)}`;
-    if (datosSgdc.getTime() < hasta.getTime() + MARGEN_FIN_MIN * 60000) {
-      console.log(`Revisión de turnos: el ${titulo} espera al SGDC (datos ${hm(datosSgdc)}).`);
+    const candado = db.collection('privado').doc(`revision_${d.id}`);
+    const refDh = db.collection('dhemaxTurnos').doc(d.id);
+    const revisado = !probar && (await candado.get()).exists;
+    const conDh = !probar && (await refDh.get()).exists;
+    if (revisado && conDh) continue;
+
+    const terminoHace = ahora - hasta;
+    const sgdcCubre = !!datosSgdc && datosSgdc.getTime() >= hasta.getTime() + MARGEN_FIN_MIN * 60000;
+    // Si el SGDC no llega (caído o atrasado), pasadas ESPERA_SGDC_H se revisa solo con los cargadores.
+    const soloCargadores = !sgdcCubre && terminoHace > ESPERA_SGDC_H * 3600000 && hayDhemax();
+    const revisar = !revisado && (sgdcCubre || soloCargadores);
+    const guardarDh = !conDh && terminoHace > ESPERA_DHEMAX_MIN * 60000 && hayDhemax();
+    if (!revisar && !guardarDh) {
+      if (!revisado) console.log(`Revisión de turnos: el ${titulo} espera al SGDC (datos ${datosSgdc ? hm(datosSgdc) : '—'}).`);
       continue;
     }
-    const candado = db.collection('privado').doc(`revision_${d.id}`);
-    if (!probar && (await candado.get()).exists) continue;
 
-    // Cargas de la ventana: las guardadas por el robot + las de esta pasada.
+    // Cargas del SGDC de la ventana: las guardadas por el robot + las de esta pasada.
     const todas = new Map();
     const g = await db.collection('sgdc')
       .where('inicio', '>=', Timestamp.fromDate(desde)).where('inicio', '<', Timestamp.fromDate(hasta)).get();
@@ -217,14 +283,38 @@ export async function revisarTurnos(db, cargas, datosSgdc, { probar = false, des
       return f && f >= desde && f < hasta && /camilo/i.test(terminal);
     });
 
+    // Cruce con los cargadores (Dhemax). Si falla, se revisa como antes, solo con el SGDC.
+    let dh = null;
+    if (hayDhemax()) {
+      try {
+        const deDhemax = await cargasDhemaxEntre(desde, hasta);
+        // Ninguna carga en todo un turno es una respuesta vacía de Dhemax, no un turno sin cargas.
+        if (deDhemax.length) dh = emparejar(t.buses ?? [], deDhemax, delTurno.filter((c) => c.pistola && c.inicio));
+        console.log(`Revisión de turnos: ${titulo} · ${deDhemax.length} cargas en los cargadores (Dhemax)` +
+          `${deDhemax.length ? '' : ': sin datos del cargador, se usa solo el SGDC'}.`);
+      } catch (e) {
+        console.log(`Revisión de turnos: Dhemax no respondió para el ${titulo} (${e.message}); se usa solo el SGDC.`);
+      }
+    }
+    if (guardarDh && dh && !probar) {
+      await refDh.set({
+        turnoId: d.id, dia: t.dia, turno: t.turno, calculado: FieldValue.serverTimestamp(), ...paraFirestore(dh),
+      });
+    }
+    if (!revisar || (soloCargadores && !dh)) continue;
+
     const sugerencias = [];
     const sinPatio = [];
-    const problemas = problemasTurno(t, delTurno, sugerencias, sinPatio);
+    const info = {};
+    const problemas = problemasTurno(t, delTurno, sugerencias, sinPatio, dh, info);
     for (const h of cortesSgdc(delTurno).horas) {
-      console.log(`Revisión de turnos: el SGDC se cortó ~${hm(h)} en el ${titulo}; no se revisa el % final de esas cargas.`);
+      console.log(`Revisión de turnos: el SGDC se cortó ~${hm(h)} en el ${titulo}; ` +
+        `${dh ? 'esas cargas se comparan con el cargador.' : 'no se revisa el % final de esas cargas.'}`);
     }
     console.log(`Revisión de turnos: ${titulo} (cerró ${t.cerradoPorNombre ?? '—'}) · ` +
-      `${delTurno.length} cargas SGDC · ${problemas.length ? `${problemas.length} a revisar` : 'todo cuadra'}.`);
+      `${delTurno.length} cargas SGDC${soloCargadores ? ' (SGDC sin datos del turno: solo cargadores)' : ''} · ` +
+      `${info.confirmadas.length} confirmadas con el cargador · ` +
+      `${problemas.length ? `${problemas.length} a revisar` : 'todo cuadra'}.`);
     for (const p of problemas) console.log('   ', p);
     if (sinPatio.length) console.log(`    anotadas sin patio en vivo (no se acusan): ${sinPatio.join(' · ')}`);
     for (const x of sugerencias) console.log(`    sugerencia: carga de ${x.pistola} ${x.de} → ${x.a} (${x.kwh ?? '—'} kWh)`);
@@ -234,19 +324,25 @@ export async function revisarTurnos(db, cargas, datosSgdc, { probar = false, des
     try {
       await candado.create({
         fecha: FieldValue.serverTimestamp(), turno: d.id, problemas: problemas.length, sinPatio: sinPatio.length,
+        conDhemax: !!dh, confirmadas: info.confirmadas.length,
       });
     } catch (e) {
       if (e.code === 6 || /already exists/i.test(e.message)) continue;
       throw e;
     }
     if (!problemas.length) continue;
+    const contra = dh ? 'el SGDC ni con los cargadores' : 'el SGDC';
     await db.collection('errores').doc(`revision_${dia}_${t.turno}`).set({
       origen: 'revisión de turno',
       donde: 'GitHub Actions · sgdc-robot',
       mensaje: `Turno ${titulo} (cerró ${t.cerradoPorNombre ?? '—'}): ${problemas.length} ` +
-        `${problemas.length === 1 ? 'bus no cuadra' : 'buses no cuadran'} con el SGDC. ` +
+        `${problemas.length === 1 ? 'cosa no cuadra' : 'cosas no cuadran'} con ${contra}. ` +
+        (soloCargadores ? 'El SGDC no tiene datos de este turno: se revisó solo con los cargadores (Dhemax). ' : '') +
         'Revísalo en HISTORIAL DE TURNOS y pregunta a quien lo anotó.\n' +
         problemas.map((p) => `• ${p}`).join('\n') +
+        (info.confirmadas.length
+          ? `\n\n${info.confirmadas.length} ${info.confirmadas.length === 1 ? 'carga que el SGDC no tiene quedó confirmada' : 'cargas que el SGDC no tiene quedaron confirmadas'} con el cargador.`
+          : '') +
         (sinPatio.length
           ? `\n\nAnotadas con el patio sin datos en vivo (el SGDC no las tiene completas; se deja lo anotado, ` +
             `no se acusan): ${sinPatio.join(' · ')}.`

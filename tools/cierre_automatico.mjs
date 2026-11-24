@@ -7,14 +7,18 @@
 // Antes de cerrar:
 //   1. Comprueba con el SGDC: corrige % inicial, % final, pistola y jornada (como "Corregir con SGDC").
 //   2. Comprueba el taller: marca PT a los que mantenimiento tiene en taller y se lo quita a los que ya salieron.
-//   3. Si el Power BI (SGDC o taller) no está al día, NO toca lo anotado a mano: cierra con los datos de los
-//      bomberos y avisa al admin para que revise ese turno.
+//   3. Si el Power BI del SGDC no está al día, comprueba con los cargadores (Dhemax, dhemax_cruce.mjs) y
+//      corrige SOLO las cargas que calzan sin duda (confirmadas por la patente del SGDC, o misma pistola
+//      anotada y % inicial a ±3 sin otra carga parecida): % inicial, % final y jornada. Lo demás queda como lo
+//      anotaron los bomberos y se avisa al admin. Sin Dhemax (o si no responde), cierra con lo anotado y avisa.
+//      Si el taller no está al día, no toca PT y avisa.
 // Después guarda la foto del turno (igual que la app) y limpia el semáforo, manteniendo taller, vidrio,
 // fuera de servicio, Pie Andino y San Carlos.
 //
 // Se apaga desde la app (config/cierreAuto.activo = false).
 
-import { chile, cambiosSgdc, ultimoCierre, turnoManual, ETIQUETAS, fmt } from './auto_correccion.mjs';
+import { chile, cambiosSgdc, jornadaDe, ultimoCierre, turnoManual, ETIQUETAS, fmt } from './auto_correccion.mjs';
+import { calzaFinal, cargasDhemaxEntre, emparejar, hayDhemax, PISTOLAS, textoCarga } from './dhemax_cruce.mjs';
 
 const PERSISTENTES = new Set(['PT', 'AV', 'FS', 'PIEA', 'TSC']);
 // El Power BI se actualiza ~:27/:32. Para cerrar, sus datos tienen que llegar al menos hasta
@@ -191,10 +195,39 @@ export async function cierreAutomatico(db, cargas, datosSgdc) {
   const corregidos = [];
   const fotos = [];
 
+  // SGDC atrasado: los cargadores (Dhemax) como respaldo. Solo cargas posteriores al último cierre y solo las
+  // que calzan sin duda (estricta); el resto queda como lo anotaron y se avisa.
+  let dh = null;
+  const porDhemax = new Map(); // id del bus → carga del cargador
+  if (!sgdcOk && hayDhemax()) {
+    try {
+      const sgdcParcial = [];
+      const g = await db.collection('sgdc')
+        .where('inicio', '>=', Timestamp.fromDate(desde)).where('inicio', '<', Timestamp.fromDate(hasta)).get();
+      for (const x of g.docs) {
+        const c = x.data();
+        if (c.pistola && /camilo/i.test(String(c.terminal ?? 'Camilo'))) sgdcParcial.push({ ...c, inicio: aFecha(c.inicio), fin: aFecha(c.fin) });
+      }
+      const todasDh = await cargasDhemaxEntre(desde, hasta);
+      // Ninguna carga en todo un turno es una respuesta vacía de Dhemax: se cierra como antes.
+      if (!todasDh.length) throw new Error('Dhemax no trajo ninguna carga del turno');
+      const deDhemax = todasDh.filter((c) => !corte || c.inicio > corte);
+      dh = emparejar(docs.map((x) => ({ id: x.id, ...x.data() })), deDhemax, sgdcParcial);
+      for (const [id, r] of dh.porBus) if (r.estricta && r.carga) porDhemax.set(id, r.carga);
+      console.log(`Cierre automático: SGDC atrasado → cargadores (Dhemax): ${deDhemax.length} cargas, ` +
+        `${porDhemax.size} buses que calzan sin duda.`);
+    } catch (e) {
+      dh = null;
+      console.log(`Cierre automático: Dhemax no respondió (${e.message}); se cierra con lo anotado.`);
+    }
+  }
+  const corregidosDh = [];
+
   for (const d of docs) {
     const b = { ...d.data() };
     const ppu = String(b.ppu ?? d.id).toUpperCase().replace(/[^A-Z0-9]/g, '');
-    const cambios = sgdcOk ? cambiosSgdc(b, paraCorregir.get(ppu) ?? []) : {};
+    const real = porDhemax.get(d.id);
+    const cambios = sgdcOk ? cambiosSgdc(b, paraCorregir.get(ppu) ?? []) : real ? cambiosDhemax(b, real) : {};
     if (tallerOk) {
       const j = cambios.jornada?.despues ?? b.jornada ?? null;
       const cargado = !!(cambios.coordenada?.despues ?? b.coordenada);
@@ -211,14 +244,16 @@ export async function cierreAutomatico(db, cargas, datosSgdc) {
       });
       batch.set(d.ref.collection('historial').doc(), {
         fecha: FieldValue.serverTimestamp(), usuario: 'robot', nombre: 'Cierre automático', cambios,
+        ...(real && !sgdcOk ? { fuente: 'cargador (Dhemax)', tr: real.tr } : {}),
       });
       const detalle = Object.entries(cambios)
         .map(([k, x]) => `${ETIQUETAS[k] ?? k}: ${fmt(x.antes)} → ${fmt(x.despues)}`).join(' · ');
       batch.set(db.collection('actividad').doc(), {
         fecha: FieldValue.serverTimestamp(), uid: 'robot', nombre: 'Cierre automático',
-        tipo: 'Corrigió antes de cerrar', detalle, ppu,
+        tipo: real && !sgdcOk ? 'Corrigió antes de cerrar (con el cargador)' : 'Corrigió antes de cerrar', detalle, ppu,
       });
       corregidos.push(`${ppu}: ${detalle}`);
+      if (real && !sgdcOk) corregidosDh.push(`${ppu} (${detalle})`);
     }
 
     // kWh (suma) y SoH (última carga) del SGDC en el turno, para la foto.
@@ -249,7 +284,8 @@ export async function cierreAutomatico(db, cargas, datosSgdc) {
       sinPatio: b.sinPatio === true ? true : null,
       cargaInicio: b.cargaInicio ?? null,
       cargaFin: b.cargaFin ?? null,
-      kwhSgdc: kwh == null ? null : Math.round(kwh * 10) / 10,
+      // Sin SGDC al día, los kWh del cargador (misma columna de energía del turno).
+      kwhSgdc: kwh != null ? Math.round(kwh * 10) / 10 : real?.kwh != null && !sgdcOk ? Math.round(real.kwh * 10) / 10 : null,
       sohSgdc: soh,
     });
 
@@ -278,7 +314,7 @@ export async function cierreAutomatico(db, cargas, datosSgdc) {
     creado: FieldValue.serverTimestamp(),
     cerradoEn: Timestamp.fromDate(ahora),
     automatico: true,
-    verificado: { sgdc: sgdcOk, taller: tallerOk },
+    verificado: { sgdc: sgdcOk, taller: tallerOk, cargadores: !!dh },
     resumen: {
       cargadas: cuenta((b) => !vacio(b.coordenada)),
       pendientes: cuenta((b) => vacio(b.coordenada) && vacio(b.jornada)),
@@ -319,7 +355,31 @@ export async function cierreAutomatico(db, cargas, datosSgdc) {
   console.log(`Cierre automático: turno ${nombre(turno)} del ${corta(dia)} cerrado (${corregidos.length} corregidos).`);
   for (const r of corregidos) console.log('  ', r);
 
-  if (!sgdcOk || !tallerOk) {
+  // Aviso al admin: qué no se pudo comprobar.
+  if (!sgdcOk && dh) {
+    // Lo comprobó con los cargadores: avisa solo si corrigió algo o quedó algo sin comprobar.
+    const conCarga = docs.map((x) => ({ id: x.id, ...x.data() })).filter((b) => PISTOLAS.has(b.coordenada));
+    const sinComprobar = conCarga.filter((b) => !porDhemax.has(b.id)).map((b) => {
+      const r = dh.porBus.get(b.id);
+      const ppu = b.ppu ?? b.id;
+      if (r?.estado === 'ambigua') return `${ppu} (${b.coordenada}: dos cargas posibles)`;
+      if (r?.estado === 'probable') return `${ppu} (${b.coordenada}: el % inicial no calza del todo)`;
+      if (r?.otraPistola) return `${ppu} (anotado en ${b.coordenada}; ¿fue en ${r.otraPistola.pistola}?)`;
+      return `${ppu} (${b.coordenada}: el cargador no tiene una carga que calce)`;
+    });
+    const sinAnotar = dh.sinAnotar.map((s) => textoCarga(s, (f) => hora(f).split(' ').pop()));
+    if (corregidosDh.length || sinComprobar.length || sinAnotar.length || !tallerOk) {
+      await avisar(db, id,
+        `Nadie cerró el turno ${nombre(turno)} del ${corta(dia)} y el robot lo cerró solo. El Power BI del SGDC no ` +
+        `estaba al día (datos del ${datosSgdc ? hora(datosSgdc) : '—'}), así que lo comprobó con los cargadores ` +
+        `(Dhemax): ${porDhemax.size} de ${conCarga.length} cargas confirmadas` +
+        `${corregidosDh.length ? `, ${corregidosDh.length} corregidas: ${corregidosDh.join(' · ')}` : ''}.` +
+        `${sinComprobar.length ? ` Sin comprobar (quedaron como las anotaron): ${sinComprobar.join(' · ')}.` : ''}` +
+        `${sinAnotar.length ? ` Cargas del cargador que nadie anotó: ${sinAnotar.join(' · ')}.` : ''}` +
+        `${!tallerOk ? ` El taller tampoco estaba al día (datos del ${datosTaller ? hora(datosTaller) : '—'}).` : ''}` +
+        ' Revísalo en HISTORIAL DE TURNOS.');
+    }
+  } else if (!sgdcOk || !tallerOk) {
     const falta = [
       !sgdcOk && `el SGDC (datos del ${datosSgdc ? hora(datosSgdc) : '—'})`,
       !tallerOk && `el taller (datos del ${datosTaller ? hora(datosTaller) : '—'})`,
@@ -329,4 +389,19 @@ export async function cierreAutomatico(db, cargas, datosSgdc) {
       `${falta} porque el Power BI no estaba al día. Quedó con lo que anotaron los bomberos: ` +
       `revísalo en HISTORIAL DE TURNOS.`);
   }
+}
+
+/// Qué cambiarle a un bus para que calce con su carga del cargador (Dhemax). Solo se llama con cargas que
+/// calzan sin duda. % inicial si difiere en más de 2; % final si no calza (cerca del 100 Dhemax marca hasta 3
+/// menos: ahí se deja lo anotado); jornada por la hora de inicio si falta o es M/T/N y no calza.
+export function cambiosDhemax(b, c) {
+  const cambios = {};
+  const poner = (k, v) => {
+    if (v != null && b[k] !== v) cambios[k] = { antes: b[k] ?? null, despues: v };
+  };
+  if (b.pctInicial == null || Math.abs(b.pctInicial - c.si) > 2) poner('pctInicial', c.si);
+  if (b.pctFinal == null || !calzaFinal(b.pctFinal, c.sf)) poner('pctFinal', c.sf);
+  const j = c.ini ? jornadaDe(new Date(c.ini)) : null;
+  if (!b.jornada || (['M', 'T', 'N'].includes(b.jornada) && b.jornada !== j)) poner('jornada', j);
+  return cambios;
 }
