@@ -1,0 +1,52 @@
+# Revisión hacia atrás de los turnos cerrados con los cargadores (Dhemax), a pedido.
+# Muestra por turno cuántas cosas acusaba la revisión solo con el SGDC y cuántas quedan con los cargadores, con
+# el detalle. Con "guardar" deja el cruce en dhemaxTurnos/<turno> (lo usa la app en Cargas sin SGDC).
+# No avisa en ERRORES ni cambia los turnos. Lanzar: gh workflow run revisar_dhemax.yml -f desde=2026-11-01 -f guardar=true
+# Secretos: FIREBASE_SERVICE_ACCOUNT, DHEMAX_USUARIO y DHEMAX_CLAVE.
+# El repo es público: el log muestra patentes, pistolas, % y kWh (como los demás robots), nunca claves ni tokens.
+name: Revisión hacia atrás con los cargadores
+
+on:
+  workflow_dispatch:
+    inputs:
+      desde:
+        description: 'Desde (AAAA-MM-DD)'
+        required: true
+      hasta:
+        description: 'Hasta (AAAA-MM-DD, vacío = hoy)'
+        required: false
+        default: ''
+      guardar:
+        description: 'Guardar los cruces en dhemaxTurnos'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  revisar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Instalar
+        working-directory: tools
+        run: npm install --no-audit --no-fund
+      - name: Revisar con los cargadores
+        working-directory: tools
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          DHEMAX_USUARIO: ${{ secrets.DHEMAX_USUARIO }}
+          DHEMAX_CLAVE: ${{ secrets.DHEMAX_CLAVE }}
+          DESDE: ${{ inputs.desde }}
+          HASTA: ${{ inputs.hasta }}
+          GUARDAR: ${{ inputs.guardar }}
+        run: |
+          args=(--desde "$DESDE" --detalle)
+          [ -n "$HASTA" ] && args+=(--hasta "$HASTA")
+          [ "$GUARDAR" = "true" ] && args+=(--guardar)
+          node revisar_con_dhemax.mjs "${args[@]}"
