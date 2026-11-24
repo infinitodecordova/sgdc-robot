@@ -14,8 +14,9 @@
 // control cada 30 min con el vivo. El vivo y el avance de las cargas en curso no cuentan como cambio.
 // dhemax/hoy = { actualizado, ok, error, dias, cargas: { tr: {...} }, vivo: { pistola: {...} }, medicion }
 // Además un control chico en config/dhemax (lo escucha la app para la tira de robots, sin leer dhemax/hoy):
-// { ultimaSync, ok, error, cargando, cargas, medicion: {atraso, intervalo, enCurso, n} }, cada 10 min o si
-// cambia ok.
+// { ultimaSync, ok, error, cargando, cargas, medicion: {atraso, intervalo, enCurso, n},
+//   vivo: { pistola: { soc, dato (ms) } } (solo las que están cargando: la tarjeta del semáforo lo muestra) },
+// cada 10 min, si cambia ok o, si cambió el % de alguna que carga, máximo 1 vez cada 3 min.
 // Medición (primeros días, para decidir el ritmo): cuántos minutos después de terminar aparece cada carga
 // (`ap` = cuándo la vio el robot por primera vez), si aparecen en curso, y cada cuánto cambia el dato en vivo.
 // Si falla: sigue intentando en la pasada siguiente; avisa en ERRORES máximo 1 vez por hora (las fallas de red
@@ -33,6 +34,7 @@ import { ErrorDhemax, SesionDhemax, diaChile, esErrorDeRed } from './dhemax_api.
 const ESCRIBIR_MS = 5 * 60000; // dhemax/hoy: máximo 1 escritura cada 5 min (cargas nuevas)
 const GUARDAR_MS = 30 * 60000; // dhemax/hoy: control con el vivo aunque no haya cargas nuevas
 const CONTROL_MS = 10 * 60000; // config/dhemax (lo escucha la app)
+const VIVO_MS = 3 * 60000; // config/dhemax con el % en vivo: máximo 1 cada 3 min (como el SoC de digiCAR)
 const AVISO_MS = 60 * 60000; // aviso en ERRORES máximo 1 por hora
 const PAUSA_LOGIN_MS = 60 * 60000;
 const INFORME_CADA = 5; // el informe (≈100 kB por día) cada 5 pasadas
@@ -117,6 +119,7 @@ export async function correrDhemax({ db = null, probar = false, cada = 60, minut
   let escrituras = 0;
   let ultimoControl = 0;
   let okControl = null;
+  let vivoControl = null;
   const control = async (datos) => {
     if (!escribe) return;
     await db.doc('config/dhemax').set({ ...datos, ultimaSync: FS.FieldValue.serverTimestamp() });
@@ -230,10 +233,16 @@ export async function correrDhemax({ db = null, probar = false, cada = 60, minut
         `en curso: ${enCurso} · dato en vivo cada ${medicion.intervaloMediano ?? '—'} s (mediana de ${intervalos.length})`);
     }
 
-    // Control chico para la app: cada 10 min o si cambió ok.
-    if (Date.now() - ultimoControl >= CONTROL_MS || okControl !== ok) {
+    // Control chico para la app: cada 10 min, si cambió ok o (máx. 1 cada 3 min) si cambió el % de las que cargan.
+    const vivoApp = Object.fromEntries(Object.entries(vivo)
+      .filter(([, x]) => /charg/i.test(x?.estado ?? '') && x.soc != null && x.soc > 0)
+      .sort(([a], [b]) => a.localeCompare(b)).map(([p, x]) => [p, { soc: x.soc, dato: x.dato }]));
+    const firmaVivo = JSON.stringify(Object.entries(vivoApp).map(([p, x]) => [p, x.soc]));
+    const desdeControl = Date.now() - ultimoControl;
+    if (desdeControl >= CONTROL_MS || okControl !== ok || (firmaVivo !== vivoControl && desdeControl >= VIVO_MS)) {
+      vivoControl = firmaVivo;
       await control({
-        ok, error,
+        ok, error, vivo: vivoApp,
         cargando: Object.values(vivo).filter((x) => /charg/i.test(x?.estado ?? '')).length,
         cargas: Object.keys(cargas).length,
         medicion: { atraso: medicion.atrasoMediano, intervalo: medicion.intervaloMediano, enCurso, n: atrasos.length },
