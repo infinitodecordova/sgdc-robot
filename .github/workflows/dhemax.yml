@@ -22,7 +22,8 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 330: el paso principal tiene su tope de 60 min; el resto es para los reintentos al encadenar.
+    timeout-minutes: 330
     steps:
       - name: ¿Están los secretos?
         id: clave
@@ -51,6 +52,7 @@ jobs:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
           DHEMAX_USUARIO: ${{ secrets.DHEMAX_USUARIO }}
           DHEMAX_CLAVE: ${{ secrets.DHEMAX_CLAVE }}
+        timeout-minutes: 60
         run: node dhemax_sync.mjs --loop --cada 60
       # El cron de GitHub se atrasa o se salta pasadas: la corrida deja pedida la siguiente (queda en cola por
       # la concurrencia). Solo si esta salió bien, para no encadenar fallas.
@@ -58,6 +60,6 @@ jobs:
         if: success() && steps.clave.outputs.si == '1'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          gh workflow run dhemax.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"
-          echo "Se pidió la corrida siguiente."
+        # Si GitHub falla, reintenta a los 5, 10 y 15 min y luego cada 30 (ver tools/encadenar.sh).
+        timeout-minutes: 270
+        run: bash tools/encadenar.sh dhemax.yml siempre
