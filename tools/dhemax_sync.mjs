@@ -68,8 +68,14 @@ async function anotarError(db, e) {
 /// Firma de las cargas para saber si hay nuevas, sin importar el orden en que Dhemax las devuelve. Solo lo que
 /// no cambia: las cargas en curso vienen con fin = última lectura (cada ~5 min) y sf/kwh subiendo (visto el 24-11),
 /// así que eso no cuenta como cambio; los valores finales quedan en la escritura siguiente.
+/// Además cambia UNA vez cuando la carga deja de actualizarse (≥ 10 min sin lectura = terminó): así se guarda con su
+/// % final ~10 min después de terminar y no a los 30 del control (la pestaña Dhemax lo usa para comparar).
+const TERMINO_MS = 10 * 60000;
 const firma = (cargas) => Object.fromEntries(Object.keys(cargas).sort()
-  .map((k) => { const { p, ini, si, dia } = cargas[k]; return [k, JSON.stringify({ p, ini, si, dia })]; }));
+  .map((k) => {
+    const { p, ini, si, dia, fin } = cargas[k];
+    return [k, JSON.stringify({ p, ini, si, dia, t: fin != null && Date.now() - fin >= TERMINO_MS })];
+  }));
 const distintas = (a, b) => new Set([...Object.keys(a), ...Object.keys(b)].filter((k) => a[k] !== b[k])).size;
 
 const cargaDoc = (c, ap) => ({
@@ -201,7 +207,7 @@ export async function correrDhemax({ db = null, probar = false, cada = 60, minut
     const ahoraFirma = firma(cargas);
     const cambiadas = distintas(ahoraFirma, escrito);
     const desde = Date.now() - ultimaEscritura;
-    const motivo = cambiadas > 0 && desde >= ESCRIBIR_MS ? `${cambiadas} cargas nuevas`
+    const motivo = cambiadas > 0 && desde >= ESCRIBIR_MS ? `${cambiadas} cargas nuevas o terminadas`
       : desde >= GUARDAR_MS ? 'control' : null;
     const medicion = {
       atrasos: atrasos.slice(-200),

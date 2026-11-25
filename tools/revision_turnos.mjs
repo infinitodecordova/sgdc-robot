@@ -29,7 +29,7 @@
 import { Timestamp, FieldValue } from 'firebase-admin/firestore';
 import { chile, reasignarReservas } from './auto_correccion.mjs';
 import { ventana } from './cierre_automatico.mjs';
-import { calzaFinal, cargasDhemaxEntre, emparejar, hayDhemax, paraFirestore, textoCarga } from './dhemax_cruce.mjs';
+import { calzaFinal, cargasDhemaxEntre, emparejar, finalDudoso, hayDhemax, paraFirestore, textoCarga } from './dhemax_cruce.mjs';
 
 // El SGDC tiene que llegar al menos hasta 20 min después del fin del turno (cargas que terminan tarde).
 const MARGEN_FIN_MIN = 20;
@@ -164,7 +164,7 @@ export function problemasTurno(t, cargas, sugerencias = [], sinPatio = [], dh = 
       }
       if (real) {
         // El SGDC no la tiene pero el cargador sí: solo importa que el % final calce.
-        if (!calzaFinal(b.pctFinal, real.sf, TOLERANCIA)) {
+        if (!finalDudoso(real) && !calzaFinal(b.pctFinal, real.sf, TOLERANCIA)) {
           out.push(`${ppu}: anotado con ${b.pctFinal} % final y el cargador dice ${real.sf} % ` +
             `(${textoCarga(real, hm)}; el SGDC no tiene la carga).`);
         } else {
@@ -206,7 +206,7 @@ export function problemasTurno(t, cargas, sugerencias = [], sinPatio = [], dh = 
       // SGDC puede haberse cortado o haber partido tarde.
       const sgdcSirve = ultima?.estado === 'Finalizada' && ultima.socFin != null && !cortadas.has(ultima);
       const conSgdc = sgdcSirve && !difiere(b.pctFinal, ultima.socFin);
-      if (!conSgdc && !calzaFinal(b.pctFinal, real.sf, TOLERANCIA)) {
+      if (!conSgdc && !finalDudoso(real) && !calzaFinal(b.pctFinal, real.sf, TOLERANCIA)) {
         out.push(`${ppu}: anotado con ${b.pctFinal} % final y el cargador dice ${real.sf} % (${textoCarga(real, hm)}` +
           `${ultima?.socFin != null && ultima.socFin !== real.sf ? `; el SGDC dice ${ultima.socFin} %` : ''}).`);
       }

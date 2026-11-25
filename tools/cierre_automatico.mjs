@@ -20,7 +20,7 @@
 import {
   chile, cambiosSgdc, cambiosJornada, condicionDe, jornadaDe, reasignarReservas, ultimoCierre, turnoManual, ETIQUETAS, fmt,
 } from './auto_correccion.mjs';
-import { calzaFinal, cargasDhemaxEntre, emparejar, hayDhemax, marcarEnCurso, PISTOLAS, textoCarga } from './dhemax_cruce.mjs';
+import { calzaFinal, cargasDhemaxEntre, emparejar, hayDhemax, marcarEnCurso, PISTOLAS, textoCarga, finalDudoso } from './dhemax_cruce.mjs';
 
 const PERSISTENTES = new Set(['PT', 'AV', 'FS', 'PIEA', 'TSC']);
 // El Power BI se actualiza ~:27/:32. Para cerrar, sus datos tienen que llegar al menos hasta
@@ -424,7 +424,7 @@ export function cambiosDhemax(b, c) {
     if (v != null && b[k] !== v) cambios[k] = { antes: b[k] ?? null, despues: v };
   };
   if (b.pctInicial == null || Math.abs(b.pctInicial - c.si) > 2) poner('pctInicial', c.si);
-  if (!c.enCurso && (b.pctFinal == null || !calzaFinal(b.pctFinal, c.sf))) poner('pctFinal', c.sf);
+  if (!c.enCurso && !finalDudoso(c) && (b.pctFinal == null || !calzaFinal(b.pctFinal, c.sf))) poner('pctFinal', c.sf);
   const j = c.ini ? jornadaDe(new Date(c.ini)) : null;
   cambiosJornada(b, j, poner);
   return cambios;

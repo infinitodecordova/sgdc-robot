@@ -341,6 +341,15 @@ export function emparejar(buses, dhemax, sgdc = []) {
   return { porBus, sinAnotar, continuadas };
 }
 
+/// El % final del cargador no cuadra con la energía (más de 5 kWh por punto, o no subió con energía de verdad): dato
+/// malo de Dhemax, no se usa para acusar ni corregir (B13-L 24-11: 50→80 % con 178 kWh, que alcanzan para ~50 puntos).
+/// Igual que CargaDhemax.finalDudoso en la app.
+export function finalDudoso(c) {
+  if (!c || c.enCurso || c.si == null || c.sf == null || (c.kwh ?? 0) < 10) return false;
+  const puntos = c.sf - c.si;
+  return puntos <= 0 || c.kwh / puntos > 5;
+}
+
 /// ¿El % final anotado calza con el del cargador? ±tol, y cerca del 100 % hasta 3 puntos más (Dhemax lee el
 /// último SoC un poco antes de que termine: 20-11, el registro del cargador decía 100 donde Dhemax 98–99).
 export function calzaFinal(anotado, cargador, tol = 2) {
