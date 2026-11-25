@@ -382,6 +382,16 @@ async function calcularBuses(mios, anterior, lugares, rutas, Timestamp) {
       })(),
     };
   }
+  // Última ruta recorrida (F10/F13 y sentido), para la ruta automática del semáforo: el recorrido se borra al entrar
+  // al terminal, esta queda (12 h). `hasta` = última vez que se lo vio en esa ruta. No cuenta para decidir si se
+  // escribe: se guarda junto con lo demás.
+  for (const [ppu, b] of Object.entries(buses)) {
+    const r = b.recorrido;
+    const ant = anterior.buses?.[ppu]?.ultimaRuta;
+    b.ultimaRuta = r?.ruta
+      ? { ruta: r.ruta, sentido: r.sentido ?? null, hasta: Timestamp.now() }
+      : ant?.hasta?.toMillis?.() > Date.now() - 12 * 3600 * 1000 ? ant : null;
+  }
   return { buses, terminal, viajes };
 }
 

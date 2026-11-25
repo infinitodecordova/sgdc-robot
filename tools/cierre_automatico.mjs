@@ -17,7 +17,9 @@
 //
 // Se apaga desde la app (config/cierreAuto.activo = false).
 
-import { chile, cambiosSgdc, jornadaDe, ultimoCierre, turnoManual, ETIQUETAS, fmt } from './auto_correccion.mjs';
+import {
+  chile, cambiosSgdc, cambiosJornada, condicionDe, jornadaDe, reasignarReservas, ultimoCierre, turnoManual, ETIQUETAS, fmt,
+} from './auto_correccion.mjs';
 import { calzaFinal, cargasDhemaxEntre, emparejar, hayDhemax, marcarEnCurso, PISTOLAS, textoCarga } from './dhemax_cruce.mjs';
 
 const PERSISTENTES = new Set(['PT', 'AV', 'FS', 'PIEA', 'TSC']);
@@ -190,6 +192,10 @@ export async function cierreAutomatico(db, cargas, datosSgdc) {
   }
 
   const docs = (await db.collection('semaforoch').get()).docs;
+  // Errores de reserva anotados: la carga a nombre de otra patente es del bus que la anotó.
+  const conReserva = docs.map((d) => ({ id: d.id, ...d.data() }));
+  reasignarReservas(conReserva, delTurno);
+  for (const m of reasignarReservas(conReserva, paraCorregir)) console.log(`Cierre automático: error de reserva ${m}.`);
   const ext = (await db.collection('externos').get()).docs;
   const batch = db.batch();
   const corregidos = [];
@@ -231,10 +237,13 @@ export async function cierreAutomatico(db, cargas, datosSgdc) {
     const real = porDhemax.get(d.id);
     const cambios = sgdcOk ? cambiosSgdc(b, paraCorregir.get(ppu) ?? []) : real ? cambiosDhemax(b, real) : {};
     if (tallerOk) {
-      const j = cambios.jornada?.despues ?? b.jornada ?? null;
-      const cargado = !!(cambios.coordenada?.despues ?? b.coordenada);
-      if (enTaller.has(ppu) && !j && !cargado) cambios.jornada = { antes: b.jornada ?? null, despues: 'PT' };
-      if (!enTaller.has(ppu) && j === 'PT') cambios.jornada = { antes: b.jornada ?? null, despues: null };
+      // La condición Taller va aparte de la carga (igual que la pestaña Taller y la corrección automática).
+      const c = cambios.condicion ? cambios.condicion.despues : condicionDe(b);
+      if (enTaller.has(ppu) && !c) cambios.condicion = { antes: b.condicion ?? null, despues: 'PT' };
+      if (!enTaller.has(ppu) && c === 'PT') {
+        cambios.condicion = { antes: b.condicion ?? 'PT', despues: null };
+        if ((cambios.jornada?.despues ?? b.jornada) === 'PT') cambios.jornada = { antes: b.jornada ?? null, despues: null };
+      }
     }
     if (Object.keys(cambios).length) {
       for (const [k, x] of Object.entries(cambios)) b[k] = x.despues;
@@ -273,6 +282,15 @@ export async function cierreAutomatico(db, cargas, datosSgdc) {
       id: d.id,
       ppu: b.ppu ?? d.id,
       jornada: b.jornada ?? null,
+      condicion: b.condicion ?? null,
+      lugar: b.lugar ?? null,
+      motivo: b.motivo ?? null,
+      motivoTexto: b.motivoTexto ?? null,
+      incidencia: b.incidencia ?? null,
+      incidenciaTexto: b.incidenciaTexto ?? null,
+      ppuReserva: b.ppuReserva ?? null,
+      pistolaNueva: b.pistolaNueva ?? null,
+      pctCambio: b.pctCambio ?? null,
       coordenada: b.coordenada ?? null,
       ruta: b.ruta ?? null,
       observacion: b.observacion ?? null,
@@ -291,12 +309,15 @@ export async function cierreAutomatico(db, cargas, datosSgdc) {
       sohSgdc: soh,
     });
 
-    // Limpieza para el turno siguiente (los persistentes conservan jornada y observación).
-    const mantener = PERSISTENTES.has(b.jornada);
+    // Limpieza para el turno siguiente: la condición (taller, vidrio, otro terminal…) sigue con su observación; la
+    // carga, la jornada, el motivo y la incidencia son del turno. Una sigla vieja de condición en la jornada se deja.
+    const mantener = condicionDe(b) != null;
     batch.update(d.ref, {
       coordenada: null, pctInicial: null, pctFinal: null, pct1: null, pct2: null, pct3: null, kwConsumo: null,
       sinPatio: null, cargaInicio: null, cargaFin: null,
-      ...(mantener ? {} : { jornada: null, observacion: null }),
+      motivo: null, motivoTexto: null, incidencia: null, incidenciaTexto: null, pistolaNueva: null, pctCambio: null, ppuReserva: null,
+      ...(PERSISTENTES.has(b.jornada) ? {} : { jornada: null }),
+      ...(mantener ? {} : { condicion: null, lugar: null, observacion: null }),
       actualizado: FieldValue.serverTimestamp(),
       actualizadoPor: 'robot',
       actualizadoPorNombre: 'Cierre automático',
@@ -319,9 +340,9 @@ export async function cierreAutomatico(db, cargas, datosSgdc) {
     verificado: { sgdc: sgdcOk, taller: tallerOk, cargadores: !!dh },
     resumen: {
       cargadas: cuenta((b) => !vacio(b.coordenada)),
-      pendientes: cuenta((b) => vacio(b.coordenada) && vacio(b.jornada)),
-      taller: cuenta((b) => b.jornada === 'PT'),
-      vidrio: cuenta((b) => b.jornada === 'AV'),
+      pendientes: cuenta((b) => vacio(b.coordenada) && vacio(b.jornada) && !condicionDe(b) && vacio(b.motivo)),
+      taller: cuenta((b) => condicionDe(b) === 'PT'),
+      vidrio: cuenta((b) => condicionDe(b) === 'AV'),
       kwTotal: fotos.reduce((s, b) => s + (b.kwConsumo ?? 0), 0),
       externos: ext.length,
     },
@@ -405,6 +426,6 @@ export function cambiosDhemax(b, c) {
   if (b.pctInicial == null || Math.abs(b.pctInicial - c.si) > 2) poner('pctInicial', c.si);
   if (!c.enCurso && (b.pctFinal == null || !calzaFinal(b.pctFinal, c.sf))) poner('pctFinal', c.sf);
   const j = c.ini ? jornadaDe(new Date(c.ini)) : null;
-  if (!b.jornada || (['M', 'T', 'N'].includes(b.jornada) && b.jornada !== j)) poner('jornada', j);
+  cambiosJornada(b, j, poner);
   return cambios;
 }

@@ -10,7 +10,58 @@ const PISTOLAS = new Set([
   'A4-L', 'A4-R', 'A5-L', 'A5-R', 'A6-L', 'A6-R',
 ]);
 
-export const ETIQUETAS = { pctInicial: '% INICIAL', pctFinal: '% FINAL', coordenada: 'COORDENADA', jornada: 'JORNADA/ EVENTO' };
+export const ETIQUETAS = {
+  pctInicial: '% INICIAL', pctFinal: '% FINAL', coordenada: 'COORDENADA', jornada: 'JORNADA', condicion: 'CONDICIÓN',
+};
+
+/// Condición del bus (PT taller, AV vidrio, FS, OT otro terminal), aparte de la carga. Lee también los datos de
+/// antes del campo `condicion`, cuando iba en `jornada` (PT, AV, FS, PIEA, TSC). Igual que Bus.condicionEf en la app.
+export function condicionDe(b) {
+  if (b.condicion) return b.condicion;
+  if (['PT', 'AV', 'FS'].includes(b.jornada)) return b.jornada;
+  if (['PIEA', 'TSC'].includes(b.jornada)) return 'OT';
+  return null;
+}
+const CONDICION_VIEJA = new Set(['PT', 'AV', 'FS', 'PIEA', 'TSC']);
+
+const normaPpu = (p) => String(p ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+/// Error de reserva anotado (incidencia RESERVA): el bus cargó con la reserva de otra patente (`ppuReserva`), así
+/// que en el SGDC su carga quedó a nombre de esa patente. Pasa a este bus las cargas de esa patente en su(s)
+/// pistola(s) (la anotada y la del cambio, si hubo); la otra patente ya no las tiene. Cambia [porPpu] (Map
+/// patente normalizada → cargas). Sirve también para el cruce de dos buses (cada uno anota la del otro).
+export function reasignarReservas(buses, porPpu) {
+  const movidas = [];
+  for (const b of buses) {
+    if (b.incidencia !== 'RESERVA' || !b.ppuReserva) continue;
+    const de = normaPpu(b.ppuReserva);
+    const a = normaPpu(b.ppu ?? b.id);
+    if (!de || de === a) continue;
+    const pistolas = new Set([b.coordenada, b.pistolaNueva].filter(Boolean));
+    const l = porPpu.get(de) ?? [];
+    const mover = l.filter((c) => !pistolas.size || pistolas.has(c.pistola));
+    if (!mover.length) continue;
+    porPpu.set(de, l.filter((c) => !mover.includes(c)));
+    porPpu.set(a, [...(porPpu.get(a) ?? []), ...mover]
+      .sort((x, y) => (x.inicio ?? x.reserva ?? 0) - (y.inicio ?? y.reserva ?? 0)));
+    movidas.push(`${a} ← ${mover.length} de ${de}`);
+  }
+  return movidas;
+}
+
+/// Jornada M/T/N que hay que poner por la hora de la carga (null si ya está bien). Si en `jornada` había una
+/// condición vieja (PT…) o NI, se reemplaza y la condición pasa a su campo (ver [condicionDe]).
+export function cambiosJornada(b, jornada, poner) {
+  if (!jornada || b.jornada === 'R' || b.jornada === jornada) return;
+  if (['M', 'T', 'N'].includes(b.jornada) || !b.jornada || b.jornada === 'NI' || CONDICION_VIEJA.has(b.jornada)) {
+    if (CONDICION_VIEJA.has(b.jornada) && !b.condicion) {
+      poner('condicion', condicionDe(b));
+      if (b.jornada === 'PIEA') poner('lugar', 'Pie Andino');
+      if (b.jornada === 'TSC') poner('lugar', 'San Carlos');
+    }
+    poner('jornada', jornada);
+  }
+}
 
 /// Hora de Chile de una fecha: { dia: 'AAAAMMDD', hm: 1345 }
 export function chile(d) {
@@ -105,15 +156,24 @@ export function cambiosSgdc(b, cargasBus) {
   const socFin = enProceso ? null : (ultima.socFin ?? null);
   const jornada = ultima.inicio ? jornadaDe(ultima.inicio) : null;
   const poner = (k, v) => {
-    if (v != null && b[k] !== v) cambios[k] = { antes: b[k] ?? null, despues: v };
+    if ((v != null || k === 'motivo') && (b[k] ?? null) !== v) cambios[k] = { antes: b[k] ?? null, despues: v };
   };
   // Anotada con el patio caído (sinPatio): el SGDC tiene a lo más una parte de la carga, así que
   // solo se rellenan los % vacíos y no se pisa lo que anotaron los bomberos.
   const pisar = b.sinPatio !== true;
   if (b.pctInicial == null || (pisar && distinto(b.pctInicial, socInicio))) poner('pctInicial', socInicio);
   if (b.pctFinal == null || (pisar && distinto(b.pctFinal, socFin))) poner('pctFinal', socFin);
-  if (!b.coordenada && PISTOLAS.has(ultima.pistola)) poner('coordenada', ultima.pistola);
-  if (!b.jornada || (['M', 'T', 'N'].includes(b.jornada) && b.jornada !== jornada)) poner('jornada', jornada);
+  // Sin pistola anotada: la de la primera carga; si siguió en otra pistola, queda como cambio de pistola.
+  if (!b.coordenada && PISTOLAS.has(primera.pistola)) {
+    poner('coordenada', primera.pistola);
+    if (!b.incidencia && PISTOLAS.has(ultima.pistola) && ultima.pistola !== primera.pistola) {
+      poner('incidencia', 'CAMBIO');
+      poner('pistolaNueva', ultima.pistola);
+    }
+  }
+  cambiosJornada(b, jornada, poner);
+  // Cargó: ya no corre el motivo de no carga.
+  if (b.motivo && (b.coordenada || cambios.coordenada)) poner('motivo', null);
   return cambios;
 }
 
@@ -161,6 +221,10 @@ export async function autoCorregir(db, cargas) {
 
   const { FieldValue } = await import('firebase-admin/firestore');
   const buses = await db.collection('semaforoch').get();
+  // Errores de reserva anotados: la carga a nombre de otra patente es de este bus.
+  for (const m of reasignarReservas(buses.docs.map((d) => ({ id: d.id, ...d.data() })), porPpu)) {
+    console.log(`Corrección automática: error de reserva ${m}.`);
+  }
   const batch = db.batch();
   const resumen = [];
   for (const d of buses.docs) {
@@ -211,13 +275,18 @@ export async function autoCorregir(db, cargas) {
 // ------------------------------------------------------------ Taller
 const TALLER_VIEJO_MIN = 150; // reporte de taller más viejo que esto: no se corrige con él (igual que la app)
 
-/// Qué cambiarle a un bus según el reporte de taller (lo mismo que el botón de la pestaña Taller):
-/// en taller, sin jornada y sin pistola → PT; con PT y ya no está en taller → sin jornada.
+/// Qué cambiarle a un bus según el reporte de taller (lo mismo que el botón de la pestaña Taller). La condición va
+/// aparte de la carga: en taller y sin otra condición → PT (aunque haya cargado); con PT y ya no está en taller → sin
+/// condición (y sin la sigla vieja PT en la jornada).
 export function cambiosTaller(b, enTaller) {
-  const j = b.jornada || null;
-  const cargado = !!b.coordenada;
-  if (enTaller && !j && !cargado) return { jornada: { antes: null, despues: 'PT' } };
-  if (!enTaller && j === 'PT') return { jornada: { antes: 'PT', despues: null } };
+  const c = condicionDe(b);
+  if (enTaller && !c) return { condicion: { antes: b.condicion ?? null, despues: 'PT' } };
+  if (!enTaller && c === 'PT') {
+    return {
+      condicion: { antes: b.condicion ?? 'PT', despues: null },
+      ...(b.jornada === 'PT' ? { jornada: { antes: 'PT', despues: null } } : {}),
+    };
+  }
   return {};
 }
 
@@ -263,7 +332,7 @@ export async function autoCorregirTaller(db) {
     const cambios = cambiosTaller(b, enTaller.has(ppu));
     if (!Object.keys(cambios).length) continue;
     batch.update(d.ref, {
-      jornada: cambios.jornada.despues,
+      ...Object.fromEntries(Object.entries(cambios).map(([k, v]) => [k, v.despues])),
       actualizado: FieldValue.serverTimestamp(),
       actualizadoPor: 'robot',
       actualizadoPorNombre: 'Robot Taller',
@@ -271,7 +340,7 @@ export async function autoCorregirTaller(db) {
     batch.set(d.ref.collection('historial').doc(), {
       fecha: FieldValue.serverTimestamp(), usuario: 'robot', nombre: 'Robot Taller', cambios,
     });
-    const detalle = `${ETIQUETAS.jornada}: ${fmt(cambios.jornada.antes)} → ${fmt(cambios.jornada.despues)}`;
+    const detalle = Object.entries(cambios).map(([k, v]) => `${ETIQUETAS[k] ?? k}: ${fmt(v.antes)} → ${fmt(v.despues)}`).join(' · ');
     batch.set(db.collection('actividad').doc(), {
       fecha: FieldValue.serverTimestamp(), uid: 'robot', nombre: 'Robot Taller', tipo: 'Corrigió con taller', detalle, ppu,
     });

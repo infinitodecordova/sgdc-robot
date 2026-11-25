@@ -27,7 +27,7 @@
 // turno, sus cargas del SGDC (~40–80).
 
 import { Timestamp, FieldValue } from 'firebase-admin/firestore';
-import { chile } from './auto_correccion.mjs';
+import { chile, reasignarReservas } from './auto_correccion.mjs';
 import { ventana } from './cierre_automatico.mjs';
 import { calzaFinal, cargasDhemaxEntre, emparejar, hayDhemax, paraFirestore, textoCarga } from './dhemax_cruce.mjs';
 
@@ -103,6 +103,8 @@ export function problemasTurno(t, cargas, sugerencias = [], sinPatio = [], dh = 
     if (!porBus.has(p)) porBus.set(p, []);
     porBus.get(p).push(c);
   }
+  // Errores de reserva anotados: la carga del SGDC a nombre de otra patente es del bus que la anotó.
+  reasignarReservas(t.buses ?? [], porBus);
   for (const l of porBus.values()) l.sort((x, y) => (x.inicio ?? x.reserva ?? 0) - (y.inicio ?? y.reserva ?? 0));
 
   // Un bus no puede cargar en dos pistolas a la vez: si el SGDC lo tiene así, una de esas cargas es de
@@ -139,6 +141,11 @@ export function problemasTurno(t, cargas, sugerencias = [], sinPatio = [], dh = 
     const m = dh?.porBus.get(b.id ?? ppu) ?? null;
     const real = m && (m.estado === 'confirmada' || m.estado === 'probable') ? m.carga : null;
     const difiere = (v, w) => v != null && w != null && Math.abs(v - w) > TOLERANCIA;
+    // Cambio de pistola anotado a una pistola distinta de la que muestra el cargador.
+    if (real?.continuaEn && b.incidencia === 'CAMBIO' && b.pistolaNueva && real.continuaEn !== b.pistolaNueva) {
+      out.push(`${ppu}: anotado con cambio a ${b.pistolaNueva} y el cargador lo tiene siguiendo en ${real.continuaEn} ` +
+        `(${textoCarga(real, hm)}).`);
+    }
     if (anotadoCargado && !l.length) {
       // ¿Hay una carga doble en su misma pistola? Esa es probablemente la suya.
       const d = conPistola && dobles.find((x) => x.c.pistola === b.coordenada && !explicadas.has(x.c));
@@ -179,10 +186,16 @@ export function problemasTurno(t, cargas, sugerencias = [], sinPatio = [], dh = 
         out.push(`${ppu}: anotado como cargado (${como}) y el SGDC no tiene ninguna carga suya en el turno.`);
       }
     }
-    if (b.jornada === 'NI' && anotadoCargado) {
-      out.push(`${ppu}: marcado NI (no ingresado a carga) pero tiene ${como}.`);
+    if ((b.jornada === 'NI' || b.motivo) && anotadoCargado) {
+      out.push(`${ppu}: marcado sin carga (${b.motivo ?? "NI"}) pero tiene ${como}.`);
     }
     // Anotado con carga y el SGDC también la tiene: ¿cuadran la pistola y el % final?
+    // Cambio de pistola anotado: el SGDC tiene que tener también la parte en la pistola nueva.
+    if (l.length && conPistola && b.incidencia === 'CAMBIO' && PISTOLAS.has(b.pistolaNueva) &&
+        !l.some((c) => c.pistola === b.pistolaNueva)) {
+      out.push(`${ppu}: anotado con cambio de pistola ${b.coordenada} → ${b.pistolaNueva} y el SGDC lo tiene en ` +
+        `${[...new Set(l.map((c) => c.pistola ?? '—'))].join(', ')}.`);
+    }
     if (l.length && conPistola && !l.some((c) => c.pistola === b.coordenada)) {
       out.push(`${ppu}: anotado en ${b.coordenada} y el SGDC lo tiene cargando en ` +
         `${[...new Set(l.map((c) => c.pistola ?? '—'))].join(', ')}.`);
@@ -206,7 +219,7 @@ export function problemasTurno(t, cargas, sugerencias = [], sinPatio = [], dh = 
           `(${ultima.pistola ?? '—'}, terminó ${hm(finDe(ultima))}).`);
       }
     }
-    if (l.length && !conPistola && b.pctFinal == null && b.jornada !== 'NI') {
+    if (l.length && !conPistola && b.pctFinal == null && b.jornada !== 'NI' && !b.motivo) {
       const u = l[l.length - 1];
       const f = aFecha(u.inicio ?? u.reserva);
       // Pasada corta (sube 2 puntos o menos, SRSC39 21-11: 76→78, 9,7 kWh): no cambia nada para operaciones.

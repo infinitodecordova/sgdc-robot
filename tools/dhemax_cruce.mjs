@@ -167,6 +167,15 @@ function duenosSgdc(dhemax, sgdc) {
  *   carga = { pistola, si, sf, kwh, ini, fin (ms), tr: [..], ppuSgdc, enCurso }
  */
 export function emparejar(buses, dhemax, sgdc = []) {
+  // Error de reserva anotado: la carga del SGDC a nombre de esa otra patente (en la pistola del bus) es del bus.
+  const reservas = buses.filter((b) => b.incidencia === 'RESERVA' && b.ppuReserva);
+  if (reservas.length) {
+    sgdc = sgdc.map((g) => {
+      const r = reservas.find((b) => norma(b.ppuReserva) === norma(g.ppu) &&
+        (g.pistola === b.coordenada || g.pistola === b.pistolaNueva));
+      return r ? { ...g, ppu: r.ppu ?? r.id } : g;
+    });
+  }
   const ses = sesiones(duenosSgdc(dhemax.filter((c) => (c.kwh ?? 0) >= KWH_MIN), sgdc));
   const usadas = new Set();
   const porBus = new Map();
@@ -212,7 +221,9 @@ export function emparejar(buses, dhemax, sgdc = []) {
       if (x.si == null) return null;
       let c = Math.abs(x.si - b.pctInicial);
       if (c > PROBABLE_PCT) return null;
-      if (b.pctFinal != null && x.sf != null) c += PESO_FINAL * Math.min(Math.abs(x.sf - b.pctFinal), 10);
+      // Con cambio de pistola, esta primera parte termina en el % del cambio (no en el % final).
+      const fin = b.incidencia === 'CAMBIO' ? b.pctCambio : b.pctFinal;
+      if (fin != null && x.sf != null) c += PESO_FINAL * Math.min(Math.abs(x.sf - fin), 10);
       return c;
     };
     // Todos los repartos posibles (cada bus: una carga distinta o ninguna). Son pocos: ≤4 buses y ≤6 cargas.
@@ -275,6 +286,25 @@ export function emparejar(buses, dhemax, sgdc = []) {
     const id = b.id ?? norma(b.ppu);
     const r = porBus.get(id);
     const c = r?.carga;
+    // Cambio de pistola anotado por el bombero: la parte en la pistola nueva, sin adivinar (parte < 90 min después
+    // y en el % del cambio ±5).
+    if (c && c.fin != null && b.incidencia === 'CAMBIO' && PISTOLAS.has(b.pistolaNueva)) {
+      const ref = b.pctCambio ?? c.sf;
+      const x = ses.filter((y) => libre(y) && !enAmbiguas0.has(y) && y.pistola === b.pistolaNueva && y.ini != null &&
+          y.ini > c.ini && y.ini - c.fin <= CONTINUA_MIN * MIN && y.si != null && ref != null &&
+          Math.abs(y.si - ref) <= PROBABLE_PCT)
+        .sort((p, q) => p.ini - q.ini)[0];
+      if (x) {
+        usadas.add(x);
+        const junta = {
+          ...c, sf: x.sf, fin: x.fin, kwh: Math.round(((c.kwh ?? 0) + (x.kwh ?? 0)) * 100) / 100,
+          tr: [...c.tr, ...x.tr], continuaEn: x.pistola, enCurso: !!x.enCurso,
+        };
+        porBus.set(id, { ...r, carga: junta, opciones: [junta] });
+        continuadas.push(`${norma(b.ppu ?? b.id)}: cambio anotado ${c.pistola} ${c.si}→${c.sf} % → ${x.pistola} ${x.si}→${x.sf} %`);
+        continue;
+      }
+    }
     if (!c || b.pctFinal == null || c.sf == null || c.fin == null || calzaFinal(b.pctFinal, c.sf)) continue;
     const cand = ses.filter((x) => libre(x) && !enAmbiguas0.has(x) && x !== c && x.ini != null && x.si != null &&
       x.ini > c.fin && x.ini - c.fin <= CONTINUA_MIN * MIN && Math.abs(x.si - c.sf) <= CONTINUA_PCT &&
