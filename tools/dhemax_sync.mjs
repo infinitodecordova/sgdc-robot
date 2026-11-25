@@ -15,7 +15,7 @@
 // dhemax/hoy = { actualizado, ok, error, dias, cargas: { tr: {...} }, vivo: { pistola: {...} }, medicion }
 // Además un control chico en config/dhemax (lo escucha la app para la tira de robots, sin leer dhemax/hoy):
 // { ultimaSync, ok, error, cargando, cargas, medicion: {atraso, intervalo, enCurso, n},
-//   vivo: { pistola: { soc, dato (ms) } } (solo las que están cargando: la tarjeta del semáforo lo muestra) },
+//   vivo: { pistola: { soc, dato (ms), si (% inicial real de la carga en curso) } } (solo las que están cargando) },
 // cada 10 min, si cambia ok o, si cambió el % de alguna que carga, máximo 1 vez cada 3 min.
 // Medición (primeros días, para decidir el ritmo): cuántos minutos después de terminar aparece cada carga
 // (`ap` = cuándo la vio el robot por primera vez), si aparecen en curso, y cada cuánto cambia el dato en vivo.
@@ -234,10 +234,18 @@ export async function correrDhemax({ db = null, probar = false, cada = 60, minut
     }
 
     // Control chico para la app: cada 10 min, si cambió ok o (máx. 1 cada 3 min) si cambió el % de las que cargan.
+    // % inicial real de la carga en curso de cada pistola (del informe): el patio muestra 95/100 falso al conectar,
+    // Dhemax no. Es la última carga de esa pistola con lectura reciente (< 10 min).
+    const inicialEnCurso = (p) => {
+      let u = null;
+      for (const c of Object.values(cargas)) if (c.p === p && (!u || c.ini > u.ini)) u = c;
+      return u && u.si != null && u.fin != null && Date.now() - u.fin < 10 * 60000 ? u.si : null;
+    };
     const vivoApp = Object.fromEntries(Object.entries(vivo)
       .filter(([, x]) => /charg/i.test(x?.estado ?? '') && x.soc != null && x.soc > 0)
-      .sort(([a], [b]) => a.localeCompare(b)).map(([p, x]) => [p, { soc: x.soc, dato: x.dato }]));
-    const firmaVivo = JSON.stringify(Object.entries(vivoApp).map(([p, x]) => [p, x.soc]));
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([p, x]) => [p, { soc: x.soc, dato: x.dato, si: inicialEnCurso(p) }]));
+    const firmaVivo = JSON.stringify(Object.entries(vivoApp).map(([p, x]) => [p, x.soc, x.si]));
     const desdeControl = Date.now() - ultimoControl;
     if (desdeControl >= CONTROL_MS || okControl !== ok || (firmaVivo !== vivoControl && desdeControl >= VIVO_MS)) {
       vivoControl = firmaVivo;
