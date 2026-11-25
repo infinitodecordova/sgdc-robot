@@ -30,6 +30,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import readline from 'node:readline';
 import { ErrorDhemax, SesionDhemax, diaChile, esErrorDeRed } from './dhemax_api.mjs';
+import { corregirInicialDhemax, siConfiable } from './dhemax_inicial.mjs';
 
 const ESCRIBIR_MS = 5 * 60000; // dhemax/hoy: máximo 1 escritura cada 5 min (cargas nuevas)
 const GUARDAR_MS = 30 * 60000; // dhemax/hoy: control con el vivo aunque no haya cargas nuevas
@@ -185,6 +186,14 @@ export async function correrDhemax({ db = null, probar = false, cada = 60, minut
       }
       for (const [p, x] of cargando) console.log(`   ⚡ ${p} ${x.soc ?? '—'} % · ${x.kw ?? '—'} kW · dato ${hm(x.dato)}`);
       for (const [p, x] of Object.entries(vivo).filter(([, y]) => y.error)) console.log(`   ⚠️ ${p} alarma ${x.error}`);
+      // % inicial del bus anotado en esa pistola con el de Dhemax (el ⚡ se toca antes de que parta la carga).
+      if (escribe && !inicial && nuevas.length) {
+        try {
+          await corregirInicialDhemax(db, nuevas.map((c) => cargaDoc(c, ahora.getTime())), cargas, ahora);
+        } catch (e) {
+          console.log(`   % inicial Dhemax: falló (${String(e.message).slice(0, 200)})`);
+        }
+      }
     } catch (e) {
       ok = false;
       error = esErrorDeRed(e) ? 'Dhemax no respondió (red)' : String(e.message).slice(0, 300);
@@ -241,11 +250,12 @@ export async function correrDhemax({ db = null, probar = false, cada = 60, minut
 
     // Control chico para la app: cada 10 min, si cambió ok o (máx. 1 cada 3 min) si cambió el % de las que cargan.
     // % inicial real de la carga en curso de cada pistola (del informe): el patio muestra 95/100 falso al conectar,
-    // Dhemax no. Es la última carga de esa pistola con lectura reciente (< 10 min).
+    // Dhemax no. Es la última carga de esa pistola con lectura reciente (< 10 min), si Dhemax la registró a tiempo
+    // (registrada tarde, su inicial es de cuando ya iba avanzada: ver siConfiable).
     const inicialEnCurso = (p) => {
       let u = null;
       for (const c of Object.values(cargas)) if (c.p === p && (!u || c.ini > u.ini)) u = c;
-      return u && u.si != null && u.fin != null && Date.now() - u.fin < 10 * 60000 ? u.si : null;
+      return u && siConfiable(u) && u.fin != null && Date.now() - u.fin < 10 * 60000 ? u.si : null;
     };
     const vivoApp = Object.fromEntries(Object.entries(vivo)
       .filter(([, x]) => /charg/i.test(x?.estado ?? '') && x.soc != null && x.soc > 0)

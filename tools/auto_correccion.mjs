@@ -95,7 +95,7 @@ const distinto = (a, b) => a != null && b != null && Math.abs(a - b) > TOLERANCI
 export const fmt = (v) => (v == null ? '—' : String(v));
 
 /// ¿Algún admin está ahora dentro de su ventana de turno?
-async function adminEnTurno(db, ahora) {
+export async function adminEnTurno(db, ahora) {
   const s = await db.collection('usuarios').where('rol', '==', 'admin').get();
   for (const u of s.docs) {
     const v = u.data().ventanas ?? {};
