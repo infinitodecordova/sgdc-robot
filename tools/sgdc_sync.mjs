@@ -434,8 +434,8 @@ async function pasada({ hacerSgdc, hacerTaller, probar = false }) {
   // Corrección automática del turno en curso (si el admin la dejó activada). Va DESPUÉS del cierre:
   // así el cierre no se lleva a su foto cargas del turno nuevo, ni las borra al limpiar.
   if (sgdc && !probar) fallo = (await corregir(sgdc)) || fallo;
-  // Incidencias que se ven en los cargadores (cambio de pistola, carga cortada): se proponen en la tarjeta.
-  if (sgdc && !probar) fallo = (await proponer()) || fallo;
+  // (Las propuestas de incidencia con Dhemax van solo en la pasada de las :40: una vez por hora basta y cada una
+  // lee los 48 buses.)
   // Revisión de los turnos ya cerrados contra el SGDC (solo avisa; va al final, con todo ya corregido).
   if (sgdc && !probar) fallo = (await revisar(sgdc)) || fallo;
   return { fallo, sgdc };
