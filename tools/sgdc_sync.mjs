@@ -422,6 +422,7 @@ async function pasada({ hacerSgdc, hacerTaller, probar = false }) {
   if (hacerTaller) {
     try {
       await sincronizarTaller(probar);
+      if (!probar) fallo = (await corregirTaller()) || fallo;
     } catch (e) {
       fallo = true;
       console.error('Falló el taller:', e.message);
@@ -447,6 +448,19 @@ async function revisar(sgdc) {
   } catch (e) {
     console.error('Falló la revisión de turnos:', e.message);
     await anotarError(e, 'robot SGDC').catch(() => {});
+    return true;
+  }
+}
+
+/// Corrección automática de la jornada PT con el reporte de taller recién traído. Devuelve true si falló.
+async function corregirTaller() {
+  try {
+    const { autoCorregirTaller } = await import('./auto_correccion.mjs');
+    await autoCorregirTaller(db);
+    return false;
+  } catch (e) {
+    console.error('Falló la corrección automática del taller:', e.message);
+    await anotarError(e, 'robot taller').catch(() => {});
     return true;
   }
 }
@@ -598,6 +612,7 @@ async function vigilar({ minutos = 55, cadaMin = 2, escala = 1 } = {}) {
       if (ht && ht.getTime() !== ultTaller) {
         await sincronizarTaller(false);
         ultTaller = ht.getTime();
+        fallo = (await corregirTaller()) || fallo;
         hizo.push(`taller nuevo (datos ${ht.toLocaleTimeString('es-CL', { timeZone: 'America/Santiago' })})`);
       }
       fallosSeguidos = 0;

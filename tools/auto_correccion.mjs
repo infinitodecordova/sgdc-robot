@@ -207,3 +207,82 @@ export async function autoCorregir(db, cargas) {
   console.log(`Corrección automática: ${resumen.length} buses corregidos.`);
   for (const r of resumen) console.log('  ', r);
 }
+
+// ------------------------------------------------------------ Taller
+const TALLER_VIEJO_MIN = 150; // reporte de taller más viejo que esto: no se corrige con él (igual que la app)
+
+/// Qué cambiarle a un bus según el reporte de taller (lo mismo que el botón de la pestaña Taller):
+/// en taller, sin jornada y sin pistola → PT; con PT y ya no está en taller → sin jornada.
+export function cambiosTaller(b, enTaller) {
+  const j = b.jornada || null;
+  const cargado = !!b.coordenada;
+  if (enTaller && !j && !cargado) return { jornada: { antes: null, despues: 'PT' } };
+  if (!enTaller && j === 'PT') return { jornada: { antes: 'PT', despues: null } };
+  return {};
+}
+
+/// Corrige la jornada PT del semáforo con el reporte de taller (si el admin la dejó activada en config/autoTaller).
+export async function autoCorregirTaller(db) {
+  const cfg = (await db.doc('config/autoTaller').get()).data() ?? {};
+  if (!cfg.activo) {
+    console.log('Corrección automática del taller: apagada.');
+    return;
+  }
+  const ahora = new Date();
+  if (!(await turnoACorregir(db, ahora))) {
+    console.log('Corrección automática del taller: no hay turno iniciado, no se corrige.');
+    return;
+  }
+  if ((cfg.modo ?? 'fueraDeTurno') === 'fueraDeTurno') {
+    const quien = await adminEnTurno(db, ahora);
+    if (quien) {
+      console.log(`Corrección automática del taller: no se corrige, ${quien} está en turno.`);
+      return;
+    }
+  }
+  const t = (await db.doc('taller/flota').get()).data() ?? {};
+  const datos = t.datos?.toDate?.() ?? null;
+  if (!datos || ahora - datos > TALLER_VIEJO_MIN * 60000) {
+    console.log('Corrección automática del taller: el reporte de taller está atrasado, no se corrige.');
+    return;
+  }
+  const enTaller = new Set(Object.keys(t.buses ?? {}).map((p) => p.toUpperCase().replace(/[^A-Z0-9]/g, '')));
+  if (!enTaller.size) {
+    // Un reporte vacío suele ser una falla del Power BI: no se le quita el PT a nadie por eso.
+    console.log('Corrección automática del taller: el reporte no trae buses en taller, no se corrige.');
+    return;
+  }
+
+  const { FieldValue } = await import('firebase-admin/firestore');
+  const buses = await db.collection('semaforoch').get();
+  const batch = db.batch();
+  const resumen = [];
+  for (const d of buses.docs) {
+    const b = d.data();
+    const ppu = String(b.ppu ?? d.id).toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const cambios = cambiosTaller(b, enTaller.has(ppu));
+    if (!Object.keys(cambios).length) continue;
+    batch.update(d.ref, {
+      jornada: cambios.jornada.despues,
+      actualizado: FieldValue.serverTimestamp(),
+      actualizadoPor: 'robot',
+      actualizadoPorNombre: 'Robot Taller',
+    });
+    batch.set(d.ref.collection('historial').doc(), {
+      fecha: FieldValue.serverTimestamp(), usuario: 'robot', nombre: 'Robot Taller', cambios,
+    });
+    const detalle = `${ETIQUETAS.jornada}: ${fmt(cambios.jornada.antes)} → ${fmt(cambios.jornada.despues)}`;
+    batch.set(db.collection('actividad').doc(), {
+      fecha: FieldValue.serverTimestamp(), uid: 'robot', nombre: 'Robot Taller', tipo: 'Corrigió con taller', detalle, ppu,
+    });
+    resumen.push(`${ppu}: ${detalle}`);
+  }
+  if (!resumen.length) {
+    console.log('Corrección automática del taller: nada que corregir.');
+    return;
+  }
+  batch.set(db.doc('config/autoTaller'), { ultima: FieldValue.serverTimestamp(), ultimaCantidad: resumen.length }, { merge: true });
+  await batch.commit();
+  console.log(`Corrección automática del taller: ${resumen.length} buses corregidos.`);
+  for (const r of resumen) console.log('  ', r);
+}
