@@ -315,7 +315,7 @@ export async function cierreAutomatico(db, cargas, datosSgdc) {
     batch.update(d.ref, {
       coordenada: null, pctInicial: null, pctFinal: null, pct1: null, pct2: null, pct3: null, kwConsumo: null,
       sinPatio: null, cargaInicio: null, cargaFin: null,
-      motivo: null, motivoTexto: null, incidencia: null, incidenciaTexto: null, pistolaNueva: null, pctCambio: null, ppuReserva: null,
+      motivo: null, motivoTexto: null, incidencia: null, incidenciaTexto: null, pistolaNueva: null, pctCambio: null, ppuReserva: null, propuesta: null, propuestaDescartada: null,
       ...(PERSISTENTES.has(b.jornada) ? {} : { jornada: null }),
       ...(mantener ? {} : { condicion: null, lugar: null, observacion: null }),
       actualizado: FieldValue.serverTimestamp(),

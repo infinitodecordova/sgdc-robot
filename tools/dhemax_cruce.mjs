@@ -122,6 +122,7 @@ function sesiones(cargas) {
       c.socIni != null && u.sf != null && Math.abs(c.socIni - u.sf) <= RECONEXION_PCT &&
       (!u.ppuSgdc || !c.ppuSgdc || u.ppuSgdc === c.ppuSgdc);
     if (sigue) {
+      u.corte ??= { pct: u.sf, hora: u.fin }; // se cortó y se reconectó en la misma pistola (la primera vez)
       u.sf = c.socFin ?? u.sf;
       u.fin = ms(c.fin) ?? u.fin;
       u.kwh = Math.round(((u.kwh ?? 0) + (c.kwh ?? 0)) * 100) / 100;
@@ -298,7 +299,7 @@ export function emparejar(buses, dhemax, sgdc = []) {
         usadas.add(x);
         const junta = {
           ...c, sf: x.sf, fin: x.fin, kwh: Math.round(((c.kwh ?? 0) + (x.kwh ?? 0)) * 100) / 100,
-          tr: [...c.tr, ...x.tr], continuaEn: x.pistola, enCurso: !!x.enCurso,
+          tr: [...c.tr, ...x.tr], continuaEn: x.pistola, enCurso: !!x.enCurso, cambio: { pct: c.sf, hora: c.fin },
         };
         porBus.set(id, { ...r, carga: junta, opciones: [junta] });
         continuadas.push(`${norma(b.ppu ?? b.id)}: cambio anotado ${c.pistola} ${c.si}→${c.sf} % → ${x.pistola} ${x.si}→${x.sf} %`);
@@ -314,7 +315,7 @@ export function emparejar(buses, dhemax, sgdc = []) {
     usadas.add(x);
     const junta = {
       ...c, sf: x.sf, fin: x.fin, kwh: Math.round(((c.kwh ?? 0) + (x.kwh ?? 0)) * 100) / 100,
-      tr: [...c.tr, ...x.tr], continuaEn: x.pistola, enCurso: !!x.enCurso,
+      tr: [...c.tr, ...x.tr], continuaEn: x.pistola, enCurso: !!x.enCurso, cambio: { pct: c.sf, hora: c.fin },
     };
     porBus.set(id, { ...r, carga: junta, opciones: [junta] });
     continuadas.push(`${norma(b.ppu ?? b.id)}: ${c.pistola} ${c.si}→${c.sf} % y siguió en ${x.pistola} ${x.si}→${x.sf} %`);

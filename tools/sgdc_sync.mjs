@@ -434,6 +434,8 @@ async function pasada({ hacerSgdc, hacerTaller, probar = false }) {
   // Corrección automática del turno en curso (si el admin la dejó activada). Va DESPUÉS del cierre:
   // así el cierre no se lleva a su foto cargas del turno nuevo, ni las borra al limpiar.
   if (sgdc && !probar) fallo = (await corregir(sgdc)) || fallo;
+  // Incidencias que se ven en los cargadores (cambio de pistola, carga cortada): se proponen en la tarjeta.
+  if (sgdc && !probar) fallo = (await proponer()) || fallo;
   // Revisión de los turnos ya cerrados contra el SGDC (solo avisa; va al final, con todo ya corregido).
   if (sgdc && !probar) fallo = (await revisar(sgdc)) || fallo;
   return { fallo, sgdc };
@@ -447,6 +449,19 @@ async function revisar(sgdc) {
     return false;
   } catch (e) {
     console.error('Falló la revisión de turnos:', e.message);
+    await anotarError(e, 'robot SGDC').catch(() => {});
+    return true;
+  }
+}
+
+/// Propuestas de incidencia con los cargadores (Dhemax). Devuelve true si falló.
+async function proponer() {
+  try {
+    const { proponerIncidencias } = await import('./propuestas.mjs');
+    await proponerIncidencias(db);
+    return false;
+  } catch (e) {
+    console.error('Fallaron las propuestas de incidencia:', e.message);
     await anotarError(e, 'robot SGDC').catch(() => {});
     return true;
   }
@@ -627,6 +642,7 @@ async function vigilar({ minutos = 55, cadaMin = 2, escala = 1 } = {}) {
       if (sgdc && Date.now() - horaSync < 25 * 60000 * escala) {
         fallo = (await cerrarSiFalta(sgdc)) || fallo;
         fallo = (await corregir(sgdc)) || fallo;
+        fallo = (await proponer()) || fallo;
         hizo.push('pasada de las :40 (con el SGDC recién traído)');
       } else {
         const r = await pasada({ hacerSgdc: true, hacerTaller: true });

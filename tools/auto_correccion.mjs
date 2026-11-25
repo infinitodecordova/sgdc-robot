@@ -137,7 +137,7 @@ export async function turnoManual(db) {
 
 /// Clave 'AAAAMMDD_AM' del turno que se corrige ahora: el iniciado, o el que toca por la hora.
 /// Null si los turnos son manuales y no hay ninguno iniciado.
-async function turnoACorregir(db, ahora) {
+export async function turnoACorregir(db, ahora) {
   const m = await turnoManual(db);
   if (!m.manual) return turnoDe(ahora);
   return m.turno ? `${m.dia}_${m.turno}` : null;
