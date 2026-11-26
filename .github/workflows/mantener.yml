@@ -12,6 +12,8 @@ permissions:
 
 jobs:
   latido:
+    # Solo en el repo de robots (público: Actions gratis). En otro repo (p. ej. la copia privada de la app) no corre.
+    if: github.repository == 'infinitodecordova/sgdc-robot'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

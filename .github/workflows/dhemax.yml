@@ -21,6 +21,8 @@ permissions:
 
 jobs:
   sync:
+    # Solo en el repo de robots (público: Actions gratis). En otro repo (p. ej. la copia privada de la app) no corre.
+    if: github.repository == 'infinitodecordova/sgdc-robot'
     runs-on: ubuntu-latest
     # 330: el paso principal tiene su tope de 60 min; el resto es para los reintentos al encadenar.
     timeout-minutes: 330
