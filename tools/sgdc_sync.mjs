@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { recorteSeguro } from './log_seguro.mjs';
 import { PEDIDOS, escucharPedidos } from './pedidos.mjs';
+import { corridaActiva, lanzarWorkflow } from './github_respaldo.mjs';
 
 const TERMINAL = 'Camilo Henriquez';
 const aqui = dirname(fileURLToPath(import.meta.url));
@@ -558,29 +559,14 @@ const ROBOTS_EN_VIVO = [
   ['dhemax.yml', () => true], // todo el día (las cargas son de día y de noche)
 ];
 
-async function github(ruta, opciones = {}) {
-  const r = await fetch(`https://api.github.com/repos/${process.env.GITHUB_REPOSITORY}${ruta}`, {
-    ...opciones,
-    headers: {
-      Accept: 'application/vnd.github+json',
-      Authorization: `Bearer ${process.env.GH_TOKEN}`,
-      'X-GitHub-Api-Version': '2022-11-28',
-      ...(opciones.body ? { 'Content-Type': 'application/json' } : {}),
-    },
-  });
-  if (!r.ok) throw new Error(`GitHub respondió ${r.status} en ${ruta}`);
-  return r.status === 204 ? null : r.json();
-}
-
 /// Lanza los robots en vivo que no estén corriendo ni en cola. Devuelve los que lanzó.
 async function revisarRobotsEnVivo() {
   if (!process.env.GH_TOKEN || !process.env.GITHUB_REPOSITORY) return [];
   const lanzados = [];
   for (const [wf, enHorario] of ROBOTS_EN_VIVO) {
     if (!enHorario()) continue;
-    const { workflow_runs: corridas = [] } = await github(`/actions/workflows/${wf}/runs?per_page=30`);
-    if (corridas.some((c) => c.status !== 'completed')) continue;
-    await github(`/actions/workflows/${wf}/dispatches`, { method: 'POST', body: JSON.stringify({ ref: 'main' }) });
+    if (await corridaActiva(wf)) continue;
+    await lanzarWorkflow(wf);
     lanzados.push(wf);
   }
   return lanzados;
@@ -592,10 +578,7 @@ async function atenderPedido(nombre) {
   const lanzados = [];
   try {
     for (const [wf, inputs] of PEDIDOS[nombre]) {
-      await github(`/actions/workflows/${wf}/dispatches`, {
-        method: 'POST',
-        body: JSON.stringify(inputs ? { ref: 'main', inputs } : { ref: 'main' }),
-      });
+      await lanzarWorkflow(wf, inputs);
       lanzados.push(wf);
     }
     console.log(`Pedido de la app: lanzó ${lanzados.join(' y ')}`);

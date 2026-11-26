@@ -30,6 +30,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import readline from 'node:readline';
 import { ErrorDhemax, SesionDhemax, diaChile, esErrorDeRed } from './dhemax_api.mjs';
+import { respaldarWorkflow } from './github_respaldo.mjs';
 import { corregirInicialDhemax, siConfiable } from './dhemax_inicial.mjs';
 
 const ESCRIBIR_MS = 5 * 60000; // dhemax/hoy: máximo 1 escritura cada 5 min (cargas nuevas)
@@ -121,6 +122,7 @@ export async function correrDhemax({ db = null, probar = false, cada = 60, minut
   let ultimaEscritura = aMs(previo.actualizado) ?? 0;
   let ultimoAviso = aMs(previo.avisoError) ?? 0;
   let primeraVez = Object.keys(cargas).length === 0; // sin historial: lo que ya está no cuenta como "nuevo"
+  const respaldoSgdc = {}; // { reviso, ultimo }: última revisión y último lanzamiento del vigilante SGDC
   let ok = true;
   let error = null;
   let escrituras = 0;
@@ -274,6 +276,11 @@ export async function correrDhemax({ db = null, probar = false, cada = 60, minut
         cargas: Object.keys(cargas).length,
         medicion: { atraso: medicion.atrasoMediano, intervalo: medicion.intervaloMediano, enCurso, n: atrasos.length },
       });
+    }
+
+    // Respaldo cruzado: si el vigilante SGDC no está corriendo ni en cola, lo lanza (cada ~5 min; no falla).
+    if (escribe && vueltas == null && await respaldarWorkflow('sgdc.yml', { vigilar: 'true' }, respaldoSgdc)) {
+      console.log('Dhemax: lanzó el vigilante SGDC (no estaba corriendo)');
     }
 
     n++;

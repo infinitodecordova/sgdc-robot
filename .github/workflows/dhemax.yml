@@ -1,6 +1,6 @@
 # Dhemax (plataforma de los cargadores): las cargas vistas desde cada cargador y el estado en vivo de cada
 # manguera (dhemax/hoy). Todo el día: cada corrida lee cada 60 s durante ~55 min y deja pedida la siguiente.
-# Respaldo: el vigilante del SGDC (sgdc.yml) lo lanza si no está corriendo.
+# Respaldo cruzado: el vigilante del SGDC (sgdc.yml) lo lanza a él si no está corriendo, y Dhemax al vigilante.
 # Secretos: FIREBASE_SERVICE_ACCOUNT, DHEMAX_USUARIO y DHEMAX_CLAVE.
 # El repo es público: el log muestra pistolas, %, kWh y horas (Dhemax no trae patentes). Nunca el token.
 name: Dhemax (cargadores)
@@ -53,6 +53,8 @@ jobs:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
           DHEMAX_USUARIO: ${{ secrets.DHEMAX_USUARIO }}
           DHEMAX_CLAVE: ${{ secrets.DHEMAX_CLAVE }}
+          GH_TOKEN: ${{ github.token }} # respaldo: lanza el vigilante SGDC si no corre
+          GITHUB_REPOSITORY: ${{ github.repository }}
         timeout-minutes: 60
         run: node dhemax_sync.mjs --loop --cada 60
       # El cron de GitHub se atrasa o se salta pasadas: la corrida deja pedida la siguiente (queda en cola por
