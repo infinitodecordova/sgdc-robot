@@ -11,6 +11,8 @@
 // Solo se llaman esas tres cosas (y Valida_Sesion en el espía). NUNCA acciones que modifiquen, y nunca
 // Usuario_Autentificado (devuelve la contraseña). La respuesta del login no se muestra ni se guarda.
 // El RUT del conductor (`conductor`) se descarta apenas llega: no sale de este archivo.
+import { recorteSeguro } from './log_seguro.mjs';
+
 
 export const BASE = 'http://200.55.219.100:8090';
 // Sentido R: del terminal al cabezal (la salida del bus desde aquí). Sentido I: del cabezal al terminal (viene de vuelta).
@@ -170,7 +172,7 @@ export class SesionIcr {
     try {
       return { status: r.status, ...JSON.parse(JSON.parse(texto).d) };
     } catch {
-      return { status: r.status, crudo: texto.slice(0, 200) };
+      return { status: r.status, crudo: recorteSeguro(texto, 200) };
     }
   }
 
@@ -188,10 +190,10 @@ export class SesionIcr {
     try {
       j = JSON.parse(texto.trim());
     } catch {
-      throw new ErrorIcr(`el ICR no devolvió JSON en ${campos.accion} (¿sesión vencida?): ${texto.trim().slice(0, 80)}`, { sesion: true });
+      throw new ErrorIcr(`el ICR no devolvió JSON en ${campos.accion} (¿sesión vencida?): ${recorteSeguro(texto)}`, { sesion: true });
     }
     if (j?.completado !== true) {
-      throw new ErrorIcr(`el ICR respondió completado:false en ${campos.accion}: ${String(j?.mensaje ?? '').slice(0, 120)}`, { sesion: true });
+      throw new ErrorIcr(`el ICR respondió completado:false en ${campos.accion}: ${recorteSeguro(j?.mensaje)}`, { sesion: true });
     }
     return j;
   }

@@ -48,9 +48,10 @@ jobs:
         with:
           node-version: 22
       - name: Instalar
+        id: instalar
         if: steps.horario.outputs.si == '1'
         working-directory: tools
-        run: npm install --no-audit --no-fund
+        run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Leer el planillón cada 3 min (~55 min)
         if: steps.horario.outputs.si == '1'
         working-directory: tools
@@ -61,9 +62,9 @@ jobs:
         timeout-minutes: 60
         run: node planillon_sync.mjs --loop --cada 180
       # El cron de GitHub se atrasa o se salta pasadas: si sigue el horario, la corrida deja pedida
-      # la siguiente (queda en cola por la concurrencia). Solo si esta salió bien, para no encadenar fallas.
+      # la siguiente (queda en cola por la concurrencia). Encadena aunque el paso anterior falle (una falla puntual no corta la cadena; el job queda rojo).
       - name: Encadenar la siguiente corrida si sigue el horario
-        if: success() && steps.horario.outputs.si == '1'
+        if: ${{ !cancelled() && steps.instalar.outcome == 'success' && steps.horario.outputs.si == '1' }}
         env:
           GH_TOKEN: ${{ github.token }}
         # Si GitHub falla, reintenta a los 5, 10 y 15 min y luego cada 30 (ver tools/encadenar.sh).

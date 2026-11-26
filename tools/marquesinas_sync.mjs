@@ -22,6 +22,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import readline from 'node:readline';
+import { MAX_RECHAZOS_LOGIN, esRechazoLogin, guardarPausa, respetarPausa } from './pausa_login.mjs';
 
 const BASE = 'http://186.67.130.114:8091/api/v2';
 const TERMINAL = 6; // Camilo Henríquez
@@ -61,7 +62,11 @@ async function entrar(usuario, clave) {
     headers: { 'Content-Type': 'application/json;charset=utf-8', Accept: 'application/json' },
     body: JSON.stringify({ username: usuario, password: clave }),
   });
-  if (!r.ok) throw new Error(`Marquesinas respondió ${r.status} al iniciar sesión: usuario o clave de marquesinas incorrectos`);
+  if (!r.ok) {
+    const e = new Error(`Marquesinas respondió ${r.status} al iniciar sesión: usuario o clave de marquesinas incorrectos`);
+    e.rechazo = esRechazoLogin(r.status); // solo credenciales rechazadas cuentan para la pausa (no 5xx ni red)
+    throw e;
+  }
   const j = await r.json();
   if (!j.token) throw new Error(`Marquesinas no devolvió token al iniciar sesión: ${j.msg ?? ''}`);
   return j.token;
@@ -373,6 +378,9 @@ export async function correrMarquesinas({
   const refEstado = escribe ? db.doc('marquesinas/estado') : null;
   const refCurva = escribe ? db.doc('config/curvaCarga') : null;
 
+  // Si rechazaron el login 3 veces seguidas, hay 1 h de pausa: espera dentro de la corrida y no intenta.
+  if (escribe && await respetarPausa(db, 'marquesinas', finMs, { esperar: vueltas == null })) return;
+
   // Lo último guardado (una sola lectura por corrida; después todo sigue en memoria).
   const previo = escribe ? (await refEstado.get()).data() ?? {} : {};
   let antes = desdeFirestore(previo.buses);
@@ -388,6 +396,7 @@ export async function correrMarquesinas({
 
   let token = null;
   let fallosLogin = 0;
+  let rechazosLogin = 0; // rechazos de credenciales seguidos (pausa de 1 h al tercero)
   let fallosLectura = 0;
   let n = 0;
 
@@ -412,8 +421,10 @@ export async function correrMarquesinas({
         try {
           token = await entrar(usuario, clave); // el token dura ~2 h: se reusa entre lecturas
           fallosLogin = 0;
+          rechazosLogin = 0;
         } catch (e) {
           fallosLogin++;
+          if (e.rechazo) rechazosLogin++;
           e.login = true;
           throw e;
         }
@@ -500,6 +511,10 @@ export async function correrMarquesinas({
       if (e.login) {
         console.warn(`[${horaChile()}] Marquesinas: falló el inicio de sesión (${fallosLogin}/${MAX_FALLOS_LOGIN}):`, e.message);
         fatal = fallosLogin >= MAX_FALLOS_LOGIN; // 3 seguidas: se avisa en ERRORES y termina
+        if (fatal && rechazosLogin >= MAX_RECHAZOS_LOGIN && escribe) {
+          await guardarPausa(db, 'marquesinas', FS).catch(() => {});
+          console.error('Marquesinas: rechazaron el login 3 veces; pausa de 1 h (no se vuelve a intentar antes).');
+        }
       } else {
         fallosLectura++;
         console.warn(`[${horaChile()}] Marquesinas: ${e.vencido ? 'el token venció' : 'falló la lectura'} ` +

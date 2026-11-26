@@ -33,12 +33,14 @@ jobs:
     steps:
       - name: ¿Hay turno ahora? (hora de Chile)
         id: horario
+        env:
+          TURNO: ${{ inputs.turno }}
         run: |
           hm=$((10#$(TZ=America/Santiago date +%H%M)))
           if { [ $hm -ge 815 ] && [ $hm -lt 1815 ]; } || [ $hm -ge 2145 ] || [ $hm -lt 745 ]; then
             echo "si=1" >> "$GITHUB_OUTPUT"
             echo "En turno ($hm): se lee el patio."
-          elif [ "${{ inputs.turno }}" = "true" ]; then
+          elif [ "$TURNO" = "true" ]; then
             echo "si=1" >> "$GITHUB_OUTPUT"
             echo "antes=1" >> "$GITHUB_OUTPUT"
             echo "Turno iniciado antes del horario ($hm): se lee el patio desde ya."
@@ -52,9 +54,10 @@ jobs:
         with:
           node-version: 22
       - name: Instalar
+        id: instalar
         if: steps.horario.outputs.si == '1'
         working-directory: tools
-        run: npm install --no-audit --no-fund
+        run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Leer el patio cada 30 s (~55 min)
         if: steps.horario.outputs.si == '1'
         working-directory: tools
@@ -65,9 +68,9 @@ jobs:
         timeout-minutes: 60
         run: node marquesinas_sync.mjs --loop --cada 30 ${{ steps.horario.outputs.antes == '1' && '--siempre' || '' }}
       # El cron de GitHub se atrasa o se salta pasadas: si sigue el turno, la corrida deja pedida
-      # la siguiente (queda en cola por la concurrencia). Solo si esta salió bien, para no encadenar fallas.
+      # la siguiente (queda en cola por la concurrencia). Encadena aunque el paso anterior falle (una falla puntual no corta la cadena; el job queda rojo).
       - name: Encadenar la siguiente corrida si sigue el turno
-        if: success() && steps.horario.outputs.si == '1'
+        if: ${{ !cancelled() && steps.instalar.outcome == 'success' && steps.horario.outputs.si == '1' }}
         env:
           GH_TOKEN: ${{ github.token }}
         # Si GitHub falla, reintenta a los 5, 10 y 15 min y luego cada 30 (ver tools/encadenar.sh).

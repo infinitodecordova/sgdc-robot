@@ -17,6 +17,8 @@
 import { readFileSync } from 'node:fs';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
+import { recorteSeguro } from './log_seguro.mjs';
+import { MAX_RECHAZOS_LOGIN, esRechazoLogin, guardarPausa, respetarPausa } from './pausa_login.mjs';
 
 const BASE = 'https://visual.digicar.cl';
 const AVISAR_VENCE_DIAS = 15;
@@ -145,9 +147,15 @@ async function obtenerToken(db) {
       body: JSON.stringify({ username: usuario, password: clave }),
     });
     if (r.status === 401) {
-      throw new Error('digiCAR respondió 401 al iniciar sesión: usuario o contraseña de digiCAR incorrectos (¿cambiaron la contraseña?)');
+      const e = new Error('digiCAR respondió 401 al iniciar sesión: usuario o contraseña de digiCAR incorrectos (¿cambiaron la contraseña?)');
+      e.rechazo = true; // credenciales rechazadas: cuenta para la pausa de 1 h
+      throw e;
     }
-    if (!r.ok) throw new Error(`digiCAR respondió ${r.status} al iniciar sesión: ${(await r.text()).slice(0, 200)}`);
+    if (!r.ok) {
+      const e = new Error(`digiCAR respondió ${r.status} al iniciar sesión: ${recorteSeguro(await r.text())}`);
+      e.rechazo = esRechazoLogin(r.status);
+      throw e;
+    }
     const j = await r.json();
     if (!j.token) throw new Error('digiCAR no devolvió token al iniciar sesión');
     return { token: j.token, vence: null, fuente: 'usuario y contraseña' };
@@ -185,7 +193,7 @@ async function obtenerToken(db) {
     body: JSON.stringify({ refreshToken: vigentes[0].t }),
   });
   if (r.status === 401) throw new Error('digiCAR respondió 401 al renovar: el refresh token venció o lo anularon');
-  if (!r.ok) throw new Error(`digiCAR respondió ${r.status} al renovar: ${(await r.text()).slice(0, 200)}`);
+  if (!r.ok) throw new Error(`digiCAR respondió ${r.status} al renovar: ${recorteSeguro(await r.text())}`);
   const j = await r.json();
   if (!j.token) throw new Error('digiCAR no devolvió token al renovar');
   if (ref && j.refreshToken) {
@@ -240,7 +248,7 @@ async function consultarDigicar(token, ids = null) {
       throw Object.assign(new Error('digiCAR respondió 403: el token de digiCAR no tiene permiso para ver los buses'), { status: 403 });
     }
     if (!r.ok) {
-      throw Object.assign(new Error(`digiCAR respondió ${r.status}: ${(await r.text()).slice(0, 300)}`), { status: r.status });
+      throw Object.assign(new Error(`digiCAR respondió ${r.status}: ${recorteSeguro(await r.text())}`), { status: r.status });
     }
     const j = await r.json();
     for (const d of j.data ?? []) {
@@ -576,6 +584,8 @@ export async function correrDigicarEnVivo({
   if (respetarHorario) finMs = Math.min(finMs, inicio + minutosHastaFinVentana() * T.min);
 
   const { FieldValue, Timestamp } = await import('firebase-admin/firestore');
+  // Si rechazaron el login 3 veces seguidas, hay 1 h de pausa: espera dentro de la corrida y no intenta.
+  if (await respetarPausa(db, 'digicar', finMs)) return;
   flota ??= await leerFlota(db);
   const refFlota = db.collection('digicar').doc('flota');
   // Lo último guardado (una lectura por corrida); después la pasada anterior queda en memoria.
@@ -594,6 +604,7 @@ export async function correrDigicarEnVivo({
   let ids = null; // ids de nuestros buses en digiCAR, si se puede pedir solo esos
   let probadoLista = false;
   let fallosLogin = 0;
+  let rechazosLogin = 0; // rechazos de credenciales seguidos (pausa de 1 h al tercero)
   let fallosLectura = 0;
   let n = 0;
 
@@ -607,8 +618,10 @@ export async function correrDigicarEnVivo({
           if (!acceso) throw new Error('digiCAR: sin credenciales (DIGICAR_USUARIO y DIGICAR_CLAVE)');
           token = acceso.token; // dura ~2 h: se reusa entre lecturas
           fallosLogin = 0;
+          rechazosLogin = 0;
         } catch (e) {
           fallosLogin++;
+          if (e.rechazo) rechazosLogin++;
           e.login = true;
           throw e;
         }
@@ -691,6 +704,10 @@ export async function correrDigicarEnVivo({
       if (e.login) {
         console.warn(`[${horaChile()}] digiCAR: falló el inicio de sesión (${fallosLogin}/${DC_MAX_FALLOS_LOGIN}):`, e.message);
         fatal = fallosLogin >= DC_MAX_FALLOS_LOGIN;
+        if (fatal && rechazosLogin >= MAX_RECHAZOS_LOGIN) {
+          await guardarPausa(db, 'digicar', { Timestamp, FieldValue }).catch(() => {});
+          console.error('digiCAR: rechazaron el login 3 veces; pausa de 1 h (no se vuelve a intentar antes).');
+        }
       } else {
         fallosLectura++;
         console.warn(`[${horaChile()}] digiCAR: ${e.vencido ? 'el token venció' : 'falló la lectura'} ` +

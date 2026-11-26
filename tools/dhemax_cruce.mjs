@@ -291,10 +291,11 @@ export function emparejar(buses, dhemax, sgdc = []) {
     // y en el % del cambio ±5).
     if (c && c.fin != null && b.incidencia === 'CAMBIO' && PISTOLAS.has(b.pistolaNueva)) {
       const ref = b.pctCambio ?? c.sf;
-      const x = ses.filter((y) => libre(y) && !enAmbiguas0.has(y) && y.pistola === b.pistolaNueva && y.ini != null &&
+      // Solo si hay UNA candidata (con dos no se adivina cuál es: sigue al flujo normal, como la rama general).
+      const cands = ses.filter((y) => libre(y) && !enAmbiguas0.has(y) && y.pistola === b.pistolaNueva && y.ini != null &&
           y.ini > c.ini && y.ini - c.fin <= CONTINUA_MIN * MIN && y.si != null && ref != null &&
-          Math.abs(y.si - ref) <= PROBABLE_PCT)
-        .sort((p, q) => p.ini - q.ini)[0];
+          Math.abs(y.si - ref) <= PROBABLE_PCT);
+      const x = cands.length === 1 ? cands[0] : null;
       if (x) {
         usadas.add(x);
         const junta = {

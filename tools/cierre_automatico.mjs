@@ -18,7 +18,7 @@
 // Se apaga desde la app (config/cierreAuto.activo = false).
 
 import {
-  chile, cambiosSgdc, cambiosJornada, condicionDe, jornadaDe, reasignarReservas, ultimoCierre, turnoManual, ETIQUETAS, fmt,
+  chile, cambiosSgdc, cambiosJornada, condicionDe, jornadaDe, reasignarReservas, ultimoCierre, turnoManual, ETIQUETAS, fmt, yaCerrado,
 } from './auto_correccion.mjs';
 import { calzaFinal, cargasDhemaxEntre, emparejar, hayDhemax, marcarEnCurso, PISTOLAS, textoCarga, finalDudoso } from './dhemax_cruce.mjs';
 
@@ -36,7 +36,7 @@ const CIERRE = {
 };
 
 /// Fecha real de una hora "de reloj" de Chile.
-function fechaChile(y, mo, d, h, mi) {
+export function fechaChile(y, mo, d, h, mi) {
   const reloj = Date.UTC(y, mo - 1, d, h, mi);
   let t = reloj;
   for (let i = 0; i < 2; i++) {
@@ -64,7 +64,7 @@ export function ventana(turno, dia) {
 }
 
 /// Turno que acaba de terminar según la hora: { turno, dia } (dia = AAAAMMDD en que empezó).
-function turnoAnterior(ahora) {
+export function turnoAnterior(ahora) {
   const { dia, hm } = chile(ahora);
   const ayer = chile(new Date(ahora.getTime() - 24 * 3600 * 1000)).dia;
   if (hm >= 2040) return { turno: 'AM', dia };
@@ -72,11 +72,17 @@ function turnoAnterior(ahora) {
   return { turno: 'PM', dia: ayer };
 }
 
-/// ¿Hay un cierre vigente (no anulado por el admin) de ese turno?
-async function yaCerrado(db, turno, dia) {
-  const s = await db.collection('turnos')
-    .where('dia', '==', conGuiones(dia)).where('turno', '==', turno).get();
-  return s.docs.some((d) => d.data().anulado !== true);
+/// Relee `yaCerrado` justo antes del commit y guarda el batch (que incluye el candado). Devuelve false si otra
+/// corrida ya cerró el turno (candado existente = error ALREADY_EXISTS, code 6, y no se escribió nada).
+export async function confirmarCierre(db, batch, turno, dia) {
+  if (await yaCerrado(db, turno, dia)) return false;
+  try {
+    await batch.commit();
+  } catch (e) {
+    if (e?.code === 6 || /already exists/i.test(e?.message ?? '')) return false;
+    throw e;
+  }
+  return true;
 }
 
 /// Aviso para el admin (sale en ERRORES, con el contador). Uno por turno.
@@ -361,20 +367,15 @@ export async function cierreAutomatico(db, cargas, datosSgdc) {
     detalle: `${nombre(turno) === 'nocturno' ? 'Nocturno' : 'Diurno'} del ${corta(dia)} · nadie lo cerró · ` +
       `${corregidos.length} corregidos · limpió el semáforo`,
   });
-  // Candado: si otra corrida (el vigilante y un pedido a mano) intenta cerrar el mismo turno en la
-  // misma hora, solo una lo hace. create() falla si el documento ya existe.
-  const c = chile(ahora);
-  try {
-    await db.collection('privado').doc(`cierre_${id}_${c.dia}${String(Math.floor(c.hm / 100)).padStart(2, '0')}`)
-      .create({ fecha: FieldValue.serverTimestamp() });
-  } catch (e) {
-    if (e.code === 6 || /already exists/i.test(e.message)) {
-      console.log(`Cierre automático: otra corrida ya está cerrando el ${nombre(turno)} del ${corta(dia)}; no se repite.`);
-      return;
-    }
-    throw e;
+  // Candado atómico: `privado/cierre_<turno>` se crea DENTRO del mismo batch de la foto. Si otra corrida ya
+  // cerró, el create falla y no se escribe nada; si el commit falla, tampoco queda candado.
+  // Ojo: el candado es permanente. Si el admin anula una foto del robot, el robot no vuelve a cerrar ese turno
+  // (el admin lo cierra a mano): es aceptable y evita cierres dobles.
+  batch.create(db.doc(`privado/cierre_${id}`), { fecha: FieldValue.serverTimestamp() });
+  if (!(await confirmarCierre(db, batch, turno, dia))) {
+    console.log(`Cierre automático: otra corrida ya cerró el ${nombre(turno)} del ${corta(dia)}; no se repite.`);
+    return;
   }
-  await batch.commit();
   console.log(`Cierre automático: turno ${nombre(turno)} del ${corta(dia)} cerrado (${corregidos.length} corregidos).`);
   for (const r of corregidos) console.log('  ', r);
 

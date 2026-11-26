@@ -3,12 +3,9 @@
 // cuando ningún admin está en su turno (según sus ventanas de edición).
 // Corrige lo mismo que el botón "Corregir con SGDC": % inicial y final, pistola y jornada.
 
+import { PISTOLAS } from './dhemax_cruce.mjs'; // una sola lista de las 26 pistolas
+
 const TOLERANCIA = 2; // puntos de %
-const PISTOLAS = new Set([
-  'B7-L', 'B7-R', 'B8-L', 'B8-R', 'B9-L', 'B9-R', 'B10-L', 'B10-R', 'B11-L', 'B11-R',
-  'B12-L', 'B12-R', 'B13-L', 'B13-R', 'A1-L', 'A1-R', 'A2-L', 'A2-R', 'A3-L', 'A3-R',
-  'A4-L', 'A4-R', 'A5-L', 'A5-R', 'A6-L', 'A6-R',
-]);
 
 export const ETIQUETAS = {
   pctInicial: '% INICIAL', pctFinal: '% FINAL', coordenada: 'COORDENADA', jornada: 'JORNADA', condicion: 'CONDICIÓN',
@@ -28,10 +25,13 @@ const normaPpu = (p) => String(p ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 
 /// Error de reserva anotado (incidencia RESERVA): el bus cargó con la reserva de otra patente (`ppuReserva`), así
 /// que en el SGDC su carga quedó a nombre de esa patente. Pasa a este bus las cargas de esa patente en su(s)
-/// pistola(s) (la anotada y la del cambio, si hubo); la otra patente ya no las tiene. Cambia [porPpu] (Map
+/// pistola(s) (la anotada y la del cambio, si hubo); la otra patente ya no las tiene. Sin pistola en el bus (no cargó, p. ej.
+/// el bombero se equivocó con un bus en taller): pasa todas las de esa patente, salvo las que están en las pistolas
+/// anotadas del otro bus (su carga propia). Cambia [porPpu] (Map
 /// patente normalizada → cargas). Sirve también para el cruce de dos buses (cada uno anota la del otro).
 export function reasignarReservas(buses, porPpu) {
   const movidas = [];
+  const yaMovidas = new Set(); // en un cruce sin pistola, lo que ya se movió no vuelve
   for (const b of buses) {
     if (b.incidencia !== 'RESERVA' || !b.ppuReserva) continue;
     const de = normaPpu(b.ppuReserva);
@@ -39,8 +39,18 @@ export function reasignarReservas(buses, porPpu) {
     if (!de || de === a) continue;
     const pistolas = new Set([b.coordenada, b.pistolaNueva].filter(Boolean));
     const l = porPpu.get(de) ?? [];
-    const mover = l.filter((c) => !pistolas.size || pistolas.has(c.pistola));
+    let mover;
+    if (pistolas.size) {
+      mover = l.filter((c) => pistolas.has(c.pistola));
+    } else {
+      // Sin pistola anotada (p. ej. un bus en taller o con vidrio que no cargó): se mueven las cargas de la otra
+      // patente que no sean las propias de ese otro bus (las de la(s) pistola(s) que él tiene anotadas).
+      const otro = buses.find((x) => normaPpu(x.ppu ?? x.id) === de);
+      const propias = new Set([otro?.coordenada, otro?.pistolaNueva].filter(Boolean));
+      mover = l.filter((c) => !propias.has(c.pistola) && !yaMovidas.has(c));
+    }
     if (!mover.length) continue;
+    for (const c of mover) yaMovidas.add(c);
     porPpu.set(de, l.filter((c) => !mover.includes(c)));
     porPpu.set(a, [...(porPpu.get(a) ?? []), ...mover]
       .sort((x, y) => (x.inicio ?? x.reserva ?? 0) - (y.inicio ?? y.reserva ?? 0)));
@@ -124,6 +134,23 @@ export async function ultimoCierre(db, turno) {
   return cierre > limpieza ? cierre : limpieza;
 }
 
+/// ¿Hay un cierre vigente (no anulado por el admin) de ese turno? (dia = 'AAAAMMDD' en que empezó)
+export async function yaCerrado(db, turno, dia) {
+  const s = await db.collection('turnos')
+    .where('dia', '==', `${dia.slice(0, 4)}-${dia.slice(4, 6)}-${dia.slice(6, 8)}`).where('turno', '==', turno).get();
+  return s.docs.some((d) => d.data().anulado !== true);
+}
+
+/// Los turnos no se sobreponen: el anterior se cierra antes de que empiece el otro. Entre el cambio de turno y la
+/// hora del cierre automático (07:40 / 20:40) el semáforo todavía tiene los datos del turno que terminó. Devuelve
+/// la clave 'AAAAMMDD_AM'/'_PM' de ese turno anterior si [turno] (el de ahora) está en esa espera; si no, null.
+export function turnoAnteriorEnEspera(turno, ahora) {
+  const { dia, hm } = chile(ahora);
+  const [d, t] = String(turno).split('_');
+  const enEspera = d === dia && ((t === 'AM' && hm < 740) || (t === 'PM' && hm >= 2000 && hm < 2040));
+  return enEspera ? turnoDe(new Date(ahora.getTime() - 3600 * 1000)) : null;
+}
+
 /// Turno iniciado a mano (config/app.turnoActual) si el admin activó los turnos manuales.
 /// Devuelve { manual: false } si están apagados, { manual: true, turno, dia } si hay uno abierto
 /// (dia = AAAAMMDD en que empezó) o { manual: true } si no hay ninguno iniciado.
@@ -137,8 +164,8 @@ export async function turnoManual(db) {
 
 /// Clave 'AAAAMMDD_AM' del turno que se corrige ahora: el iniciado, o el que toca por la hora.
 /// Null si los turnos son manuales y no hay ninguno iniciado.
-export async function turnoACorregir(db, ahora) {
-  const m = await turnoManual(db);
+export async function turnoACorregir(db, ahora, manual = null) {
+  const m = manual ?? await turnoManual(db);
   if (!m.manual) return turnoDe(ahora);
   return m.turno ? `${m.dia}_${m.turno}` : null;
 }
@@ -186,10 +213,20 @@ export async function autoCorregir(db, cargas) {
   }
   const ahora = new Date();
   // Turnos manuales: solo se corrige el turno iniciado; sin turno iniciado no se toca el semáforo.
-  const turno = await turnoACorregir(db, ahora);
+  const manual = await turnoManual(db);
+  const turno = await turnoACorregir(db, ahora, manual);
   if (!turno) {
     console.log('Corrección automática: no hay turno iniciado, no se corrige.');
     return;
+  }
+  // Turnos por hora (no manuales): entre el cambio de turno y el cierre automático el semáforo aún tiene los datos
+  // del turno anterior sin cerrar; corregir ahora mezclaría un turno con el otro. Se espera al cierre.
+  if (!manual.manual) {
+    const previo = turnoAnteriorEnEspera(turno, ahora);
+    if (previo && !(await yaCerrado(db, previo.split('_')[1], previo.split('_')[0]))) {
+      console.log(`Corrección automática: el turno anterior (${previo}) aún no se cierra; se espera al cierre, no se corrige.`);
+      return;
+    }
   }
   if ((cfg.modo ?? 'fueraDeTurno') === 'fueraDeTurno') {
     const quien = await adminEnTurno(db, ahora);

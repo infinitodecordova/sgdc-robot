@@ -11,6 +11,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { recorteSeguro } from './log_seguro.mjs';
 
 const TERMINAL = 'Camilo Henriquez';
 const aqui = dirname(fileURLToPath(import.meta.url));
@@ -100,7 +101,7 @@ async function consultar(cuerpo, origen = C) {
     },
     body: JSON.stringify(cuerpo),
   });
-  if (!r.ok) throw new Error(`Power BI respondió ${r.status}: ${(await r.text()).slice(0, 300)}`);
+  if (!r.ok) throw new Error(`Power BI respondió ${r.status}: ${recorteSeguro(await r.text())}`);
   return r.json();
 }
 
@@ -254,7 +255,7 @@ async function sincronizarSgdc(probar) {
     return;
   }
 
-  const { FieldValue, FieldPath } = await import('firebase-admin/firestore');
+  const { FieldValue } = await import('firebase-admin/firestore');
   const ahora = FieldValue.serverTimestamp();
 
   // Solo se escriben las cargas nuevas o que cambiaron (ahorra escrituras del plan gratis).
@@ -318,19 +319,6 @@ async function sincronizarSgdc(probar) {
 
   // La corrección automática corre en main(), DESPUÉS del cierre automático.
   return { cargas, datos: horaReporte(actualizado) };
-
-  // Limpieza: borra las cargas guardadas con el identificador antiguo (quedaban repetidas).
-  let borradas = 0;
-  for (let i = 0; i < 10; i++) {
-    const viejas = (await db.collection('sgdc').orderBy(FieldPath.documentId()).startAt('2').endAt('2\uf8ff').limit(400).get())
-      .docs.filter((d) => /^\d{4}-\d{2}-\d{2}_/.test(d.id));
-    if (!viejas.length) break;
-    const b = db.batch();
-    for (const d of viejas) b.delete(d.ref);
-    await b.commit();
-    borradas += viejas.length;
-  }
-  if (borradas) console.log(`SGDC: ${borradas} cargas repetidas (formato antiguo) borradas.`);
 }
 
 /// PPU del semáforo. Se guarda en un solo documento y se rehace una vez al día

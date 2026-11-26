@@ -39,8 +39,9 @@ jobs:
         with:
           node-version: 22
       - name: Instalar
+        id: instalar
         working-directory: tools
-        run: npm install --no-audit --no-fund
+        run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Vigilar los Power BI (~55 min)
         if: github.event_name == 'schedule' || inputs.vigilar
         working-directory: tools
@@ -61,10 +62,10 @@ jobs:
           DHEMAX_CLAVE: ${{ secrets.DHEMAX_CLAVE }}
         timeout-minutes: 60
         run: node sgdc_sync.mjs --sin-digicar
-      # Deja pedida la corrida siguiente (queda en cola por la concurrencia). Corre todo el día:
+      # Deja pedida la corrida siguiente (queda en cola por la concurrencia), aunque el vigilante haya fallado. Corre todo el día:
       # el cierre automático de las 20:40 queda fuera del horario de turno.
       - name: Encadenar la siguiente corrida
-        if: success() && (github.event_name == 'schedule' || inputs.vigilar)
+        if: ${{ !cancelled() && steps.instalar.outcome == 'success' && (github.event_name == 'schedule' || inputs.vigilar) }}
         env:
           GH_TOKEN: ${{ github.token }}
         # Si GitHub falla, reintenta a los 5, 10 y 15 min y luego cada 30 (ver tools/encadenar.sh).

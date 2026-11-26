@@ -29,7 +29,7 @@
 import { Timestamp, FieldValue } from 'firebase-admin/firestore';
 import { chile, reasignarReservas } from './auto_correccion.mjs';
 import { ventana } from './cierre_automatico.mjs';
-import { calzaFinal, cargasDhemaxEntre, emparejar, finalDudoso, hayDhemax, paraFirestore, textoCarga } from './dhemax_cruce.mjs';
+import { calzaFinal, cargasDhemaxEntre, emparejar, finalDudoso, hayDhemax, paraFirestore, PISTOLAS, textoCarga } from './dhemax_cruce.mjs';
 
 // El SGDC tiene que llegar al menos hasta 20 min después del fin del turno (cargas que terminan tarde).
 const MARGEN_FIN_MIN = 20;
@@ -39,14 +39,10 @@ const VENTANA_H = 36;
 const ESPERA_SGDC_H = 4;
 // El cruce con los cargadores se guarda (dhemaxTurnos) cuando el turno terminó hace al menos esto.
 const ESPERA_DHEMAX_MIN = 30;
+const DHEMAX_REINTENTO_H = 4; // si Dhemax falla o viene vacío para un turno, no se vuelve a pedir antes de esto
 const SUBE = 2; // puntos: % final que supera al inicial en más que esto = se anotó como cargado
 const TOLERANCIA = 2; // puntos: diferencia aceptada entre el % final anotado y el del SGDC
 const CORTA_PCT = 2; // carga del SGDC sin anotar que sube esto o menos: no cuenta como problema
-const PISTOLAS = new Set([
-  'B7-L', 'B7-R', 'B8-L', 'B8-R', 'B9-L', 'B9-R', 'B10-L', 'B10-R', 'B11-L', 'B11-R',
-  'B12-L', 'B12-R', 'B13-L', 'B13-R', 'A1-L', 'A1-R', 'A2-L', 'A2-R', 'A3-L', 'A3-R',
-  'A4-L', 'A4-R', 'A5-L', 'A5-R', 'A6-L', 'A6-R',
-]);
 
 const norma = (p) => String(p ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 const aFecha = (x) => x?.toDate?.() ?? x ?? null;
@@ -307,16 +303,28 @@ export async function revisarTurnos(db, cargas, datosSgdc, { probar = false, des
     });
 
     // Cruce con los cargadores (Dhemax). Si falla, se revisa como antes, solo con el SGDC.
+    // Si Dhemax falló o vino vacío para este turno, no se vuelve a pedir antes de DHEMAX_REINTENTO_H
+    // (privado/dhemax_intento_<turno>; solo se lee y escribe cuando de verdad se iba a pedir).
     let dh = null;
     if (hayDhemax()) {
-      try {
-        const deDhemax = await cargasDhemaxEntre(desde, hasta);
-        // Ninguna carga en todo un turno es una respuesta vacía de Dhemax, no un turno sin cargas.
-        if (deDhemax.length) dh = emparejar(t.buses ?? [], deDhemax, delTurno.filter((c) => c.pistola && c.inicio));
-        console.log(`Revisión de turnos: ${titulo} · ${deDhemax.length} cargas en los cargadores (Dhemax)` +
-          `${deDhemax.length ? '' : ': sin datos del cargador, se usa solo el SGDC'}.`);
-      } catch (e) {
-        console.log(`Revisión de turnos: Dhemax no respondió para el ${titulo} (${e.message}); se usa solo el SGDC.`);
+      const refIntento = db.collection('privado').doc(`dhemax_intento_${d.id}`);
+      const ultimo = probar ? null : aFecha((await refIntento.get()).data()?.fecha)?.getTime() ?? null;
+      if (ultimo != null && ahora.getTime() - ultimo < DHEMAX_REINTENTO_H * 3600000) {
+        console.log(`Revisión de turnos: ${titulo} · Dhemax falló hace poco; no se pide de nuevo antes de ${DHEMAX_REINTENTO_H} h.`);
+      } else {
+        let fallo = false;
+        try {
+          const deDhemax = await cargasDhemaxEntre(desde, hasta);
+          // Ninguna carga en todo un turno es una respuesta vacía de Dhemax, no un turno sin cargas.
+          if (deDhemax.length) dh = emparejar(t.buses ?? [], deDhemax, delTurno.filter((c) => c.pistola && c.inicio));
+          else fallo = true;
+          console.log(`Revisión de turnos: ${titulo} · ${deDhemax.length} cargas en los cargadores (Dhemax)` +
+            `${deDhemax.length ? '' : ': sin datos del cargador, se usa solo el SGDC'}.`);
+        } catch (e) {
+          fallo = true;
+          console.log(`Revisión de turnos: Dhemax no respondió para el ${titulo} (${e.message}); se usa solo el SGDC.`);
+        }
+        if (fallo && !probar) await refIntento.set({ fecha: FieldValue.serverTimestamp(), turnoId: d.id }).catch(() => {});
       }
     }
     if (guardarDh && dh && !probar) {

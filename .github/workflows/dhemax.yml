@@ -42,9 +42,10 @@ jobs:
         with:
           node-version: 22
       - name: Instalar
+        id: instalar
         if: steps.clave.outputs.si == '1'
         working-directory: tools
-        run: npm install --no-audit --no-fund
+        run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Leer Dhemax cada 60 s (~55 min)
         if: steps.clave.outputs.si == '1'
         working-directory: tools
@@ -55,9 +56,9 @@ jobs:
         timeout-minutes: 60
         run: node dhemax_sync.mjs --loop --cada 60
       # El cron de GitHub se atrasa o se salta pasadas: la corrida deja pedida la siguiente (queda en cola por
-      # la concurrencia). Solo si esta salió bien, para no encadenar fallas.
+      # la concurrencia). Encadena aunque el paso anterior falle (una falla puntual no corta la cadena; el job queda rojo).
       - name: Encadenar la siguiente corrida
-        if: success() && steps.clave.outputs.si == '1'
+        if: ${{ !cancelled() && steps.instalar.outcome == 'success' && steps.clave.outputs.si == '1' }}
         env:
           GH_TOKEN: ${{ github.token }}
         # Si GitHub falla, reintenta a los 5, 10 y 15 min y luego cada 30 (ver tools/encadenar.sh).

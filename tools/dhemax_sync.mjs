@@ -159,7 +159,10 @@ export async function correrDhemax({ db = null, probar = false, cada = 60, minut
         const dias = [ayer(ahora), diaChile(ahora)];
         const lista = [...(await s.cargasDelDia(dias[0])), ...(await s.cargasDelDia(dias[1]))];
         const siguen = {};
-        for (const c of lista) {
+        // Respuesta vacía de Dhemax en los dos días = sin datos (no "no hubo cargas"): se conservan las anteriores.
+        const vacia = lista.length === 0 && Object.keys(cargas).length > 0;
+        if (vacia) console.log(`${hm(ahora)} · Dhemax devolvió el informe vacío (ayer y hoy): se conservan las ${Object.keys(cargas).length} cargas anteriores.`);
+        for (const c of vacia ? [] : lista) {
           if (c.tr == null) continue;
           const k = String(c.tr);
           const ap = cargas[k]?.ap ?? ahora.getTime();
@@ -170,7 +173,7 @@ export async function correrDhemax({ db = null, probar = false, cada = 60, minut
           }
           siguen[k] = cargaDoc(c, ap);
         }
-        cargas = siguen; // solo las de los dos días pedidos (las más viejas se van solas)
+        if (!vacia) cargas = siguen; // solo las de los dos días pedidos (las más viejas se van solas)
         primeraVez = false;
       }
       ok = true;
