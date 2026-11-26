@@ -19,6 +19,30 @@ const TERMINAL = 'Camilo Henriquez';
 const aqui = dirname(fileURLToPath(import.meta.url));
 const C = JSON.parse(readFileSync(join(aqui, 'sgdc_consultas.json'), 'utf8'));
 
+// ------------------------------------------------------------ Historial de publicaciones
+// Las últimas horas de datos de cada Power BI (para que la app aprenda cada cuánto publican). Se guarda en la
+// MISMA escritura de siempre; el historial previo se lee una sola vez (al arrancar `vigilar`) y queda en memoria.
+let historialSgdc = null; // null = todavía no se ha leído
+let historialTaller = null;
+
+/// Agrega `nueva` (texto "AAAA-MM-DD HH:mm:ss", Date o Timestamp) al historial: sin repetidos, ordenado,
+/// solo las últimas `max`. Devuelve un arreglo nuevo; si `nueva` no sirve, el historial queda igual.
+export function agregarHistorial(historial, nueva, max = 8) {
+  const valor = (v) => {
+    if (v == null) return null;
+    const x = typeof v?.toDate === 'function' ? v.toDate() : v;
+    const t = x instanceof Date ? x.getTime() : Date.parse(String(x).replace(' ', 'T') + (/[zZ]|[+-]\d\d:?\d\d$/.test(String(x)) ? '' : 'Z'));
+    return Number.isNaN(t) ? null : t;
+  };
+  const porValor = new Map();
+  for (const v of [...(Array.isArray(historial) ? historial : []), nueva]) {
+    const t = valor(v);
+    if (t == null) continue;
+    porValor.set(t, typeof v?.toDate === 'function' ? v.toDate() : v);
+  }
+  return [...porValor.entries()].sort((a, b) => a[0] - b[0]).slice(-max).map(([, v]) => v);
+}
+
 // ------------------------------------------------------------ Decodificar respuesta
 // Power BI responde en formato "DSR" comprimido: filas que repiten valores (R),
 // nulos (Ø) y diccionarios de textos (ValueDicts).
@@ -311,9 +335,12 @@ async function sincronizarSgdc(probar) {
   for (const [k, m] of meses) {
     if (m.cambio) batch.set(db.doc(`sgdcMes/${k}`), { datos: JSON.stringify(m.datos), n: Object.keys(m.datos).length, actualizado: ahora });
   }
+  if (historialSgdc == null) historialSgdc = (await db.doc('config/sgdc').get()).data()?.historialDatos ?? [];
+  historialSgdc = agregarHistorial(historialSgdc, actualizado);
   batch.set(db.doc('config/sgdc'), {
     ultimaSync: ahora,
     datosReporte: actualizado,
+    historialDatos: historialSgdc,
     cargasHoy: cargas.length,
   }, { merge: true });
   await batch.commit();
@@ -391,7 +418,9 @@ async function sincronizarTaller(probar) {
     return;
   }
   const { FieldValue } = await import('firebase-admin/firestore');
-  await db.doc('taller/flota').set({ buses, datos, actualizado: FieldValue.serverTimestamp() });
+  if (historialTaller == null) historialTaller = (await db.doc('taller/flota').get()).data()?.historialDatos ?? [];
+  historialTaller = agregarHistorial(historialTaller, datos);
+  await db.doc('taller/flota').set({ buses, datos, historialDatos: historialTaller, actualizado: FieldValue.serverTimestamp() });
   console.log(`Taller: ${n} buses guardados en Firestore.`);
 }
 
@@ -590,8 +619,13 @@ async function atenderPedido(nombre) {
 
 async function vigilar({ minutos = 55, cadaMin = 2, escala = 1 } = {}) {
   const fin = Date.now() + minutos * 60000 * escala;
-  let ultSgdc = (await db.doc('config/sgdc').get()).data()?.datosReporte ?? null;
-  let ultTaller = (await db.doc('taller/flota').get()).data()?.datos?.toMillis?.() ?? null;
+  // Las mismas 2 lecturas de siempre; de paso queda en memoria el historial de publicaciones.
+  const docSgdc = (await db.doc('config/sgdc').get()).data();
+  const docTaller = (await db.doc('taller/flota').get()).data();
+  let ultSgdc = docSgdc?.datosReporte ?? null;
+  let ultTaller = docTaller?.datos?.toMillis?.() ?? null;
+  historialSgdc = docSgdc?.historialDatos ?? [];
+  historialTaller = docTaller?.historialDatos ?? [];
   let sgdc = null; // última pasada del SGDC (cargas en memoria)
   let horaSync = 0;
   let tickHecho = null; // hora en que ya se hizo la pasada de las :40
