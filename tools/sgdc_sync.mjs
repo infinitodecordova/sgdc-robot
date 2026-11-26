@@ -12,6 +12,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { recorteSeguro } from './log_seguro.mjs';
+import { PEDIDOS, escucharPedidos } from './pedidos.mjs';
 
 const TERMINAL = 'Camilo Henriquez';
 const aqui = dirname(fileURLToPath(import.meta.url));
@@ -585,6 +586,25 @@ async function revisarRobotsEnVivo() {
   return lanzados;
 }
 
+/// Atiende un pedido de la app (robot/pedido*): lanza su workflow. Nunca tumba al vigilante.
+async function atenderPedido(nombre) {
+  if (!process.env.GH_TOKEN || !process.env.GITHUB_REPOSITORY) return;
+  const lanzados = [];
+  try {
+    for (const [wf, inputs] of PEDIDOS[nombre]) {
+      await github(`/actions/workflows/${wf}/dispatches`, {
+        method: 'POST',
+        body: JSON.stringify(inputs ? { ref: 'main', inputs } : { ref: 'main' }),
+      });
+      lanzados.push(wf);
+    }
+    console.log(`Pedido de la app: lanzó ${lanzados.join(' y ')}`);
+  } catch (e) {
+    console.warn(`Pedido de la app: no se pudo lanzar (${lanzados.join(' y ') || 'ninguno'} listo):`, e.message);
+    await anotarError(e, 'robot SGDC').catch(() => {});
+  }
+}
+
 async function vigilar({ minutos = 55, cadaMin = 2, escala = 1 } = {}) {
   const fin = Date.now() + minutos * 60000 * escala;
   let ultSgdc = (await db.doc('config/sgdc').get()).data()?.datosReporte ?? null;
@@ -596,6 +616,11 @@ async function vigilar({ minutos = 55, cadaMin = 2, escala = 1 } = {}) {
   let fallo = false;
   let revisoEnVivo = 0; // última revisión del patio y digiCAR en vivo
   console.log(`Vigilando los Power BI cada ${cadaMin} min (SGDC: ${ultSgdc ?? '—'}).`);
+  // Pedidos de la app (botones Actualizar y Iniciar turno): listeners de 3 documentos, 1 lectura por cambio.
+  const cerrarPedidos = db
+    ? escucharPedidos(db, (nombre) => { atenderPedido(nombre); },
+        { alError: (e, n) => console.warn(`No se pudo escuchar robot/${n}:`, e.message) })
+    : () => {};
   while (Date.now() < fin) {
     const t0 = Date.now();
     const h = horaChileAhora();
@@ -657,6 +682,7 @@ async function vigilar({ minutos = 55, cadaMin = 2, escala = 1 } = {}) {
     if (Date.now() + espera >= fin) break;
     await new Promise((ok) => setTimeout(ok, Math.max(0, espera)));
   }
+  cerrarPedidos();
   console.log('Vigilancia terminada.');
   return fallo;
 }
