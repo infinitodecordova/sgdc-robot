@@ -3,7 +3,7 @@
 # (el 25-11 respondió 500/502 de 12:52 a 13:13 y se cortaron SGDC, Dhemax y Planillón).
 #
 # Uso: bash tools/encadenar.sh WORKFLOW HORARIO [ANTES]
-#   HORARIO: siempre | turno (08:15–18:15, 21:45–07:45) | planillon (05:00–00:30)
+#   HORARIO: siempre | turno (08:15–18:15, 21:45–07:45) | planillon (05:00–00:25; el robot lee hasta 00:30)
 #   ANTES=1 (solo turno): lanzado con "Iniciar turno"; fuera de la ventana encadena con -f turno=true.
 #   sgdc.yml siempre encadena con -f vigilar=true.
 #
@@ -32,7 +32,9 @@ argumentos() {
       elif [ "$ANTES" = "1" ]; then echo "-f turno=true"
       else echo "no"; fi ;;
     planillon)
-      if [ $hm -ge 500 ] || [ $hm -lt 30 ]; then echo ""; else echo "no"; fi ;;
+      # Hasta las 00:25: una corrida lanzada después solo alcanza a hacer 1 pasada antes de las 00:30
+      # y vuelve a encadenar (el 26-11 se lanzaron 6 seguidas entre 00:27 y 00:30).
+      if [ $hm -ge 500 ] || [ $hm -lt 25 ]; then echo ""; else echo "no"; fi ;;
     *) echo "no" ;;
   esac
 }

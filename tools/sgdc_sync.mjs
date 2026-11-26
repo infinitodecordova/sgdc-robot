@@ -555,10 +555,11 @@ function enHorarioEnVivo(d = new Date()) {
   return (hm >= 815 && hm < 1815) || hm >= 2145 || hm < 745;
 }
 
-/// Horario del planillón: 05:00–00:30 (igual que HORARIO en planillon_sync.mjs y planillon.yml).
+/// Horario del planillón para lanzarlo: 05:00–00:25 (HORARIO en planillon_sync.mjs termina a las 00:30;
+/// lanzarlo en los últimos 5 min solo da una pasada suelta, igual que en tools/encadenar.sh).
 function enHorarioPlanillon(d = new Date()) {
   const hm = hmChileAhora(d);
-  return hm >= 500 || hm < 30;
+  return hm >= 500 || hm < 25;
 }
 
 const ROBOTS_EN_VIVO = [
