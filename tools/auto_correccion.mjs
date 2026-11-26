@@ -26,8 +26,10 @@ const normaPpu = (p) => String(p ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 /// Error de reserva anotado (incidencia RESERVA): el bus cargó con la reserva de otra patente (`ppuReserva`), así
 /// que en el SGDC su carga quedó a nombre de esa patente. Pasa a este bus las cargas de esa patente en su(s)
 /// pistola(s) (la anotada y la del cambio, si hubo); la otra patente ya no las tiene. Sin pistola en el bus (no cargó, p. ej.
-/// el bombero se equivocó con un bus en taller): pasa todas las de esa patente, salvo las que están en las pistolas
-/// anotadas del otro bus (su carga propia). Cambia [porPpu] (Map
+/// el bombero se equivocó con un bus en taller): pasa las de esa patente salvo las que están en las pistolas
+/// anotadas del otro bus (su carga propia). Si NINGUNO de los dos buses tiene pistola anotada (no hay cómo saber cuál
+/// es de quién), solo se mueve si la otra patente tiene UNA sola carga en el turno; con más no se mueve y el
+/// resultado trae el aviso para el log (26-11). Cambia [porPpu] (Map
 /// patente normalizada → cargas). Sirve también para el cruce de dos buses (cada uno anota la del otro).
 export function reasignarReservas(buses, porPpu) {
   const movidas = [];
@@ -48,6 +50,10 @@ export function reasignarReservas(buses, porPpu) {
       const otro = buses.find((x) => normaPpu(x.ppu ?? x.id) === de);
       const propias = new Set([otro?.coordenada, otro?.pistolaNueva].filter(Boolean));
       mover = l.filter((c) => !propias.has(c.pistola) && !yaMovidas.has(c));
+      if (!propias.size && mover.length > 1) {
+        movidas.push(`${a}: no se movió nada de ${de} (${mover.length} cargas en el turno y ningún bus tiene pistola anotada)`);
+        continue;
+      }
     }
     if (!mover.length) continue;
     for (const c of mover) yaMovidas.add(c);
@@ -118,17 +124,21 @@ export async function adminEnTurno(db, ahora) {
   return null;
 }
 
-/// Desde cuándo NO se deben volver a escribir cargas de [turno] ('AAAAMMDD_AM' / '_PM'): la hora del
-/// último "Cerrar turno" de ESE MISMO turno, o del último "Limpiar semáforo", lo que sea más nuevo.
-/// El cierre de OTRO turno no corta nada (si el diurno se cierra a las 20:40, las cargas del
-/// nocturno de 20:00–20:40 siguen valiendo). Devuelve null si no hay corte.
-/// Los turnos anulados por el admin (anulado: true) no cuentan.
-export async function ultimoCierre(db, turno) {
+/// Desde cuándo NO se deben volver a escribir cargas: la hora del último "Cerrar turno" vigente de CUALQUIER turno,
+/// o del último "Limpiar semáforo", lo que sea más nuevo. Una carga pertenece al turno que la cerró (decisión 26-11):
+/// si el nocturno se cierra a las 07:45, la carga que partió 07:35 ya quedó en esa foto y el diurno no la reescribe;
+/// una que parte 07:50 sí vale. Devuelve null si no hay corte. Los turnos anulados por el admin (anulado: true) no
+/// cuentan. [turno] ya no se usa (se deja por compatibilidad con quienes llaman).
+export async function ultimoCierre(db, _turno) {
   const s = await db.collection('turnos').orderBy('cerradoEn', 'desc').limit(10).get();
-  const t = s.docs.map((d) => d.data()).find((x) => x.anulado !== true);
-  const clave = t ? `${String(t.dia ?? '').replace(/-/g, '')}_${t.turno}` : null;
-  const cierre = t && (!turno || clave === turno) ? t.cerradoEn?.toDate?.() ?? null : null;
   const limpieza = (await db.doc('config/limpieza').get()).data()?.fecha?.toDate?.() ?? null;
+  return corteDeCierres(s.docs.map((d) => d.data()), limpieza);
+}
+
+/// Parte pura de [ultimoCierre]: el más nuevo entre el último cierre no anulado (de cualquier turno) y la limpieza.
+export function corteDeCierres(turnos, limpieza = null) {
+  const t = (turnos ?? []).find((x) => x.anulado !== true);
+  const cierre = t?.cerradoEn?.toDate?.() ?? t?.cerradoEn ?? null;
   if (!cierre) return limpieza;
   if (!limpieza) return cierre;
   return cierre > limpieza ? cierre : limpieza;

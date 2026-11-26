@@ -5,7 +5,8 @@
 // compara la foto del turno con las cargas del SGDC de esa ventana y avisa al admin en ERRORES si:
 //   1. Un bus quedó anotado como cargado (pistola o % que sube) y el SGDC no tiene ninguna carga suya.
 //   2. Un bus quedó "BUS NO INGRESADO A CARGA" (NI) pero con pistola o % que sube.
-//   3. El SGDC tiene una carga de un bus que en el turno no quedó anotada (sin pistola ni % final).
+//   3. El SGDC tiene una carga de un bus que en el turno no quedó anotada (sin pistola ni % final, o marcado
+//      sin carga NI / motivo y sin pistola).
 //   4. El SGDC tiene una carga de un bus que no está en la foto del turno ni en otros terminales.
 //   5. El SGDC tiene un bus cargando en dos pistolas a la vez (patente mal digitada en el cargador). Si en
 //      esa pistola hay un bus anotado sin carga a su nombre, se dice que la carga es probablemente suya.
@@ -31,7 +32,7 @@ import { chile, reasignarReservas } from './auto_correccion.mjs';
 import { ventana } from './cierre_automatico.mjs';
 import { calzaFinal, cargasDhemaxEntre, emparejar, finalDudoso, hayDhemax, paraFirestore, PISTOLAS, textoCarga } from './dhemax_cruce.mjs';
 
-// El SGDC tiene que llegar al menos hasta 20 min después del fin del turno (cargas que terminan tarde).
+// Sin hora de cierre (no pasa con turnos cerrados): el SGDC tiene que llegar 20 min después del fin de la ventana.
 const MARGEN_FIN_MIN = 20;
 // Solo turnos cerrados en las últimas 36 h (después de eso ya no se espera más al SGDC).
 const VENTANA_H = 36;
@@ -215,7 +216,10 @@ export function problemasTurno(t, cargas, sugerencias = [], sinPatio = [], dh = 
           `(${ultima.pistola ?? '—'}, terminó ${hm(finDe(ultima))}).`);
       }
     }
-    if (l.length && !conPistola && b.pctFinal == null && b.jornada !== 'NI' && !b.motivo) {
+    // El SGDC tiene carga y la foto no tiene pistola: sin % final, o marcado sin carga (NI / motivo, SRSC67 20-11: 132 kWh
+    // y en la foto "NI"). Si además sube el %, ya lo avisó el punto 2 (marcado sin carga pero con %).
+    const sinCargaEnFoto = b.jornada === 'NI' || !!b.motivo;
+    if (l.length && !conPistola && !sube && (b.pctFinal == null || sinCargaEnFoto)) {
       const u = l[l.length - 1];
       const f = aFecha(u.inicio ?? u.reserva);
       // Pasada corta (sube 2 puntos o menos, SRSC39 21-11: 76→78, 9,7 kWh): no cambia nada para operaciones.
@@ -225,7 +229,8 @@ export function problemasTurno(t, cargas, sugerencias = [], sinPatio = [], dh = 
         continue;
       }
       out.push(`${ppu}: el SGDC tiene carga (${u.pistola ?? '—'}, ${pct(l[0].socInicio, u.socFin)}` +
-        `${f ? `, ${hm(f)}` : ''}) y en el turno no quedó anotada.`);
+        `${f ? `, ${hm(f)}` : ''}) y en el turno no quedó anotada` +
+        `${sinCargaEnFoto ? ` (en la foto figura sin carga: ${b.motivo ?? 'NI'}, sin pistola)` : ''}.`);
     }
   }
   // Cargas del cargador que no son de ningún bus anotado y que el SGDC tampoco tiene.
@@ -255,6 +260,30 @@ export function problemasTurno(t, cargas, sugerencias = [], sinPatio = [], dh = 
 }
 
 /**
+ * Decide si un turno cerrado ya se puede revisar. El turno termina cuando se cerró (`cerradoEn`; sus cargas son
+ * las que empezaron antes) y basta la primera publicación del SGDC posterior al cierre, siempre que ninguna
+ * carga del turno siga "En proceso" (se cerró con un bus cargando): en ese caso espera la siguiente
+ * publicación y, pasadas ESPERA_SGDC_H, se revisa igual. Sin `cerradoEn` se usa `hasta` + MARGEN_FIN_MIN.
+ * @param cargasTurno cargas del SGDC del turno conocidas (Date en inicio)
+ */
+export function estadoRevision({ cerradoEn, hasta, datosSgdc, cargasTurno = [], ahora, hayDhemax: dh = false }) {
+  const cierre = aFecha(cerradoEn);
+  const finEfectivo = cierre ?? hasta;
+  const datosOk = !!datosSgdc && datosSgdc.getTime() >= finEfectivo.getTime() + (cierre ? 1 : MARGEN_FIN_MIN * 60000);
+  const enProceso = cargasTurno.filter((c) => /proceso/i.test(String(c.estado ?? ''))).length;
+  const terminoHace = ahora - finEfectivo;
+  const pasoEspera = terminoHace > ESPERA_SGDC_H * 3600000;
+  const sgdcCubre = datosOk && (!cierre || enProceso === 0 || pasoEspera);
+  const soloCargadores = !sgdcCubre && pasoEspera && dh;
+  let espera = null;
+  if (!sgdcCubre) {
+    espera = datosOk ? `espera: ${enProceso} cargas del SGDC siguen en proceso`
+      : `espera al SGDC posterior al cierre (${hm(finEfectivo)}; datos ${datosSgdc ? hm(datosSgdc) : '—'})`;
+  }
+  return { finEfectivo, terminoHace, sgdcCubre, soloCargadores, enProceso, espera };
+}
+
+/**
  * @param db Firestore
  * @param cargas cargas del SGDC de esta pasada (inicio/reserva/fin como Date)
  * @param datosSgdc Date de los datos del Power BI del SGDC
@@ -276,30 +305,35 @@ export async function revisarTurnos(db, cargas, datosSgdc, { probar = false, des
     const conDh = !probar && (await refDh.get()).exists;
     if (revisado && conDh) continue;
 
-    const terminoHace = ahora - hasta;
-    const sgdcCubre = !!datosSgdc && datosSgdc.getTime() >= hasta.getTime() + MARGEN_FIN_MIN * 60000;
+    // Fin del turno = su cierre. "En proceso" se mira con las cargas de esta pasada (sin leer Firestore).
+    const enVentana = (c, fin) => {
+      const f = c.inicio ?? c.reserva;
+      return f && f >= desde && f < fin && /camilo/i.test(String(c.terminal ?? 'Camilo Henriquez'));
+    };
+    const finPrevio = aFecha(t.cerradoEn) ?? hasta;
     // Si el SGDC no llega (caído o atrasado), pasadas ESPERA_SGDC_H se revisa solo con los cargadores.
-    const soloCargadores = !sgdcCubre && terminoHace > ESPERA_SGDC_H * 3600000 && hayDhemax();
+    const { finEfectivo, terminoHace, sgdcCubre, soloCargadores, espera } = estadoRevision({
+      cerradoEn: t.cerradoEn, hasta, datosSgdc, ahora, hayDhemax: hayDhemax(),
+      cargasTurno: (cargas ?? []).filter((c) => enVentana(c, finPrevio)),
+    });
     const revisar = !revisado && (sgdcCubre || soloCargadores);
     const guardarDh = !conDh && terminoHace > ESPERA_DHEMAX_MIN * 60000 && hayDhemax();
     if (!revisar && !guardarDh) {
-      if (!revisado) console.log(`Revisión de turnos: el ${titulo} espera al SGDC (datos ${datosSgdc ? hm(datosSgdc) : '—'}).`);
+      if (!revisado) console.log(`Revisión de turnos: el ${titulo} ${espera ?? 'espera'}.`);
       continue;
     }
 
     // Cargas del SGDC de la ventana: las guardadas por el robot + las de esta pasada.
     const todas = new Map();
     const g = await db.collection('sgdc')
-      .where('inicio', '>=', Timestamp.fromDate(desde)).where('inicio', '<', Timestamp.fromDate(hasta)).get();
+      .where('inicio', '>=', Timestamp.fromDate(desde)).where('inicio', '<', Timestamp.fromDate(finEfectivo)).get();
     for (const x of g.docs) {
       const c = x.data();
       todas.set(x.id, { ...c, inicio: aFecha(c.inicio), reserva: aFecha(c.reserva), fin: aFecha(c.fin) });
     }
     for (const c of cargas ?? []) todas.set(String(c.id).replace(/\//g, '_'), c);
     const delTurno = [...todas.values()].filter((c) => {
-      const f = c.inicio ?? c.reserva;
-      const terminal = String(c.terminal ?? 'Camilo Henriquez');
-      return f && f >= desde && f < hasta && /camilo/i.test(terminal);
+      return enVentana(c, finEfectivo);
     });
 
     // Cruce con los cargadores (Dhemax). Si falla, se revisa como antes, solo con el SGDC.
@@ -314,7 +348,7 @@ export async function revisarTurnos(db, cargas, datosSgdc, { probar = false, des
       } else {
         let fallo = false;
         try {
-          const deDhemax = await cargasDhemaxEntre(desde, hasta);
+          const deDhemax = await cargasDhemaxEntre(desde, finEfectivo);
           // Ninguna carga en todo un turno es una respuesta vacía de Dhemax, no un turno sin cargas.
           if (deDhemax.length) dh = emparejar(t.buses ?? [], deDhemax, delTurno.filter((c) => c.pistola && c.inicio));
           else fallo = true;

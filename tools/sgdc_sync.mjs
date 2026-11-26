@@ -635,7 +635,7 @@ async function vigilar({ minutos = 55, cadaMin = 2, escala = 1 } = {}) {
   console.log(`Vigilando los Power BI cada ${cadaMin} min (SGDC: ${ultSgdc ?? '—'}).`);
   // Pedidos de la app (botones Actualizar y Iniciar turno): listeners de 3 documentos, 1 lectura por cambio.
   const cerrarPedidos = db
-    ? escucharPedidos(db, (nombre) => { atenderPedido(nombre); },
+    ? await escucharPedidos(db, (nombre) => { atenderPedido(nombre); },
         { alError: (e, n) => console.warn(`No se pudo escuchar robot/${n}:`, e.message) })
     : () => {};
   while (Date.now() < fin) {

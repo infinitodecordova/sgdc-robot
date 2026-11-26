@@ -3,8 +3,6 @@
 // Necesita GH_TOKEN y GITHUB_REPOSITORY; sin ellos no hace nada.
 import { recorteSeguro } from './log_seguro.mjs';
 
-/// Estados de una corrida que cuentan como "andando o en cola" (todo menos completed).
-const ESTADOS_ACTIVOS = ['in_progress', 'queued', 'waiting', 'requested', 'pending'];
 
 export function hayCredenciales() {
   return Boolean(process.env.GH_TOKEN && process.env.GITHUB_REPOSITORY);
@@ -24,9 +22,16 @@ export async function github(ruta, opciones = {}) {
   return r.status === 204 ? null : r.json();
 }
 
-/// ¿Alguna de las corridas está andando o en cola? (cualquier estado distinto de completed)
-export function hayCorridaActiva(corridas) {
-  return (corridas ?? []).some((c) => c.status !== 'completed' || ESTADOS_ACTIVOS.includes(c.status));
+/// Una corrida "activa" creada hace más de esto es fantasma (GitHub la dejó colgada): no cuenta.
+export const CORRIDA_FANTASMA_H = 6;
+
+/// ¿Alguna de las corridas está andando o en cola? (cualquier estado distinto de completed, creada hace < 6 h)
+export function hayCorridaActiva(corridas, ahora = Date.now()) {
+  return (corridas ?? []).some((c) => {
+    if (c.status === 'completed') return false;
+    const creada = c.created_at ? Date.parse(c.created_at) : NaN;
+    return !(Number.isFinite(creada) && ahora - creada > CORRIDA_FANTASMA_H * 3600000);
+  });
 }
 
 /// ¿Hay una corrida de este workflow andando o en cola?
@@ -46,7 +51,7 @@ export async function lanzarWorkflow(wf, inputs = null) {
 /// Decisión pura: ¿lanzar ahora? Sin corridas activas y pasada la espera desde el último lanzamiento
 /// (GitHub tarda en mostrar la corrida recién lanzada).
 export function debeLanzar({ corridas, ultimoLanzamiento = null, ahora = Date.now(), esperaMin = 10 }) {
-  if (hayCorridaActiva(corridas)) return false;
+  if (hayCorridaActiva(corridas, ahora)) return false;
   if (ultimoLanzamiento != null && ahora - ultimoLanzamiento < esperaMin * 60000) return false;
   return true;
 }
