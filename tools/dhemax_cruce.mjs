@@ -337,6 +337,16 @@ export function emparejar(buses, dhemax, sgdc = []) {
     const c = sinAnotar.filter((s) => refs.some((v) => Math.abs(s.si - v) <= OTRA_PISTOLA_PCT));
     if (c.length === 1) r.otraPistola = c[0];
   }
+  // 4b. Pistola mal anotada confirmada por el SGDC: el bus sin carga en su pistola tiene una carga a su nombre en el
+  //     SGDC, en otra pistola, con su % inicial (±ESTRICTO_PCT) y una sola. Sirve para proponer la corrección.
+  for (const b of conPistola) {
+    const r = porBus.get(b.id ?? norma(b.ppu));
+    if (r.estado !== 'sin_carga' || b.pctInicial == null) continue;
+    const ppu = norma(b.ppu ?? b.id);
+    const c = ses.filter((s) => s.ppuSgdc === ppu && s.pistola !== b.coordenada && PISTOLAS.has(s.pistola) &&
+      !usadas.has(s) && s.si != null && Math.abs(s.si - b.pctInicial) <= ESTRICTO_PCT);
+    if (c.length === 1) r.enOtraPistola = c[0];
+  }
   const sugeridas = new Set([...porBus.values()].map((r) => r.otraPistola).filter(Boolean));
   sinAnotar = sinAnotar.filter((s) => !sugeridas.has(s));
   return { porBus, sinAnotar, continuadas };

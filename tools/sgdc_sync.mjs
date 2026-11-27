@@ -474,10 +474,10 @@ async function revisar(sgdc) {
 }
 
 /// Propuestas de incidencia con los cargadores (Dhemax). Devuelve true si falló.
-async function proponer() {
+async function proponer(cargasSgdc = []) {
   try {
     const { proponerIncidencias } = await import('./propuestas.mjs');
-    await proponerIncidencias(db);
+    await proponerIncidencias(db, cargasSgdc);
     return false;
   } catch (e) {
     console.error('Fallaron las propuestas de incidencia:', e.message);
@@ -673,7 +673,7 @@ async function vigilar({ minutos = 55, cadaMin = 2, escala = 1 } = {}) {
       if (sgdc && Date.now() - horaSync < 25 * 60000 * escala) {
         fallo = (await cerrarSiFalta(sgdc)) || fallo;
         fallo = (await corregir(sgdc)) || fallo;
-        fallo = (await proponer()) || fallo;
+        fallo = (await proponer(sgdc.cargas)) || fallo;
         hizo.push('pasada de las :40 (con el SGDC recién traído)');
       } else {
         const r = await pasada({ hacerSgdc: true, hacerTaller: true });
