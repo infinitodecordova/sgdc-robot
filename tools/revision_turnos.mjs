@@ -30,6 +30,7 @@
 import { Timestamp, FieldValue } from 'firebase-admin/firestore';
 import { chile, reasignarReservas } from './auto_correccion.mjs';
 import { ventana } from './cierre_automatico.mjs';
+import { correccionDe } from './propuestas.mjs';
 import { calzaFinal, cargasDhemaxEntre, emparejar, finalDudoso, hayDhemax, paraFirestore, PISTOLAS, textoCarga } from './dhemax_cruce.mjs';
 
 // Sin hora de cierre (no pasa con turnos cerrados): el SGDC tiene que llegar 20 min después del fin de la ventana.
@@ -87,11 +88,13 @@ export function cortesSgdc(cargas) {
 /// ({ pistola, de, a, inicio, kwh, soh, socInicio, socFin }).
 /**
  * @param dh cruce con los cargadores (emparejar() de dhemax_cruce.mjs) o null si Dhemax no está disponible.
- * @param info se llena con { confirmadas: [ppu] } (cargas que el SGDC no tenía y el cargador sí, bien anotadas) y
+ * @param info se llena con { correcciones: [...] } (pistola o % final que se puede corregir sin duda, ver
+ *   `correccionDe`; las aplica el admin desde el Historial; el problema se cuenta igual), { confirmadas: [ppu] } (cargas que el SGDC no tenía y el cargador sí, bien anotadas) y
  *   { erroresSgdc: [texto] } (patente mal digitada en el cargador: lo anotado está bien, no cuenta como problema).
  */
 export function problemasTurno(t, cargas, sugerencias = [], sinPatio = [], dh = null, info = {}) {
   info.confirmadas ??= [];
+  info.correcciones ??= [];
   info.erroresSgdc ??= [];
   info.cortas ??= [];
   const porBus = new Map();
@@ -138,6 +141,13 @@ export function problemasTurno(t, cargas, sugerencias = [], sinPatio = [], dh = 
     const m = dh?.porBus.get(b.id ?? ppu) ?? null;
     const real = m && (m.estado === 'confirmada' || m.estado === 'probable') ? m.carga : null;
     const difiere = (v, w) => v != null && w != null && Math.abs(v - w) > TOLERANCIA;
+    // Corrección propuesta (SGDC y cargador de acuerdo, sin duda): extra al problema, no lo reemplaza.
+    const cor = t.anulado === true ? null : correccionDe(b, m, l, { autoCorrige: false });
+    if (cor?.tipo === 'PISTOLA') {
+      info.correcciones.push({ tipo: 'pistola', ppu, anotado: cor.anotada, real: cor.pistola, evidencia: cor.texto, clave: cor.clave });
+    } else if (cor?.tipo === 'PCT_FINAL') {
+      info.correcciones.push({ tipo: 'pctFinal', ppu, anotado: cor.anotado, real: cor.pct, evidencia: cor.texto, clave: cor.clave });
+    }
     // Cambio de pistola anotado a una pistola distinta de la que muestra el cargador.
     if (real?.continuaEn && b.incidencia === 'CAMBIO' && b.pistolaNueva && real.continuaEn !== b.pistolaNueva) {
       out.push(`${ppu}: anotado con cambio a ${b.pistolaNueva} y el cargador lo tiene siguiendo en ${real.continuaEn} ` +
@@ -376,7 +386,7 @@ export async function revisarTurnos(db, cargas, datosSgdc, { probar = false, des
       console.log(`Revisión de turnos: el SGDC se cortó ~${hm(h)} en el ${titulo}; ` +
         `${dh ? 'esas cargas se comparan con el cargador.' : 'no se revisa el % final de esas cargas.'}`);
     }
-    console.log(`Revisión de turnos: ${titulo} (cerró ${t.cerradoPorNombre ?? '—'}) · ` +
+    console.log(`Revisión de turnos: ${titulo} (${t.cerradoPor === 'robot' ? 'cerró el automático' : 'cerrado'}) · ` +
       `${delTurno.length} cargas SGDC${soloCargadores ? ' (SGDC sin datos del turno: solo cargadores)' : ''} · ` +
       `${info.confirmadas.length} confirmadas con el cargador · ` +
       `${problemas.length ? `${problemas.length} a revisar` : 'todo cuadra'}.`);
@@ -385,6 +395,7 @@ export async function revisarTurnos(db, cargas, datosSgdc, { probar = false, des
     for (const p of dh?.continuadas ?? []) console.log('    (carga continuada en otra pistola)', p);
     if (info.cortas.length) console.log(`    cargas cortas del SGDC sin anotar (no cuentan): ${info.cortas.join(' · ')}`);
     if (sinPatio.length) console.log(`    anotadas sin patio en vivo (no se acusan): ${sinPatio.join(' · ')}`);
+    for (const x of info.correcciones) console.log(`    corrección propuesta: ${x.ppu} ${x.tipo} ${x.anotado} → ${x.real}`);
     for (const x of sugerencias) console.log(`    sugerencia: carga de ${x.pistola} ${x.de} → ${x.a} (${x.kwh ?? '—'} kWh)`);
     if (probar) continue;
 
@@ -402,7 +413,7 @@ export async function revisarTurnos(db, cargas, datosSgdc, { probar = false, des
     await db.collection('turnos').doc(d.id).update({
       verificacion: {
         sgdc: !soloCargadores, cargadores: !!dh, problemas: problemas.length,
-        confirmadas: info.confirmadas.length, revisado: FieldValue.serverTimestamp(),
+        confirmadas: info.confirmadas.length, correcciones: info.correcciones, revisado: FieldValue.serverTimestamp(),
       },
     });
     if (!problemas.length && !info.erroresSgdc.length) continue;
@@ -437,6 +448,7 @@ export async function revisarTurnos(db, cargas, datosSgdc, { probar = false, des
         (soloCargadores ? 'El SGDC no tiene datos de este turno: se revisó solo con los cargadores (Dhemax). ' : '') +
         'Revísalo en HISTORIAL DE TURNOS y pregunta a quien lo anotó.\n' +
         problemas.map((p) => `• ${p}`).join('\n') +
+        info.correcciones.map((x) => `\n→ Se puede corregir desde el Historial: ${x.ppu} ${x.anotado}${x.tipo === 'pctFinal' ? ' %' : ''} → ${x.real}${x.tipo === 'pctFinal' ? ' %' : ''}`).join('') +
         (info.erroresSgdc.length
           ? `\n\nError del SGDC (lo anotado está bien, no cuenta): ${info.erroresSgdc.map((p) => `\n• ${p}`).join('')}`
           : '') +
