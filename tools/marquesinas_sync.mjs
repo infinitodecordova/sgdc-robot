@@ -22,6 +22,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import readline from 'node:readline';
+import { recorteSeguro } from './log_seguro.mjs';
 import { MAX_RECHAZOS_LOGIN, esRechazoLogin, guardarPausa, respetarPausa } from './pausa_login.mjs';
 
 const BASE = 'http://186.67.130.114:8091/api/v2';
@@ -68,7 +69,7 @@ async function entrar(usuario, clave) {
     throw e;
   }
   const j = await r.json();
-  if (!j.token) throw new Error(`Marquesinas no devolvió token al iniciar sesión: ${j.msg ?? ''}`);
+  if (!j.token) throw new Error(`Marquesinas no devolvió token al iniciar sesión: ${recorteSeguro(j.msg ?? '')}`);
   return j.token;
 }
 

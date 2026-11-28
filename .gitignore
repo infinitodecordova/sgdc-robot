@@ -1,2 +1,8 @@
 serviceAccount*.json
 node_modules/
+*.har
+.env
+.env.*
+personal.tsv
+*.xlsx
+*.json.key

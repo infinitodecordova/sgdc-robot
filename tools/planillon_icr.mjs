@@ -153,7 +153,7 @@ export class SesionIcr {
     }
     if (d?.completado !== true) {
       // El mensaje de la página ("usuario o clave incorrectos"…), recortado y sin nada más.
-      throw new ErrorIcr(`el ICR no dejó entrar: ${String(d?.mensaje ?? 'sin mensaje').slice(0, 120)}`);
+      throw new ErrorIcr(`el ICR no dejó entrar: ${recorteSeguro(String(d?.mensaje ?? 'sin mensaje'), 120)}`);
     }
     if (!this.cookies.has('ASP.NET_SessionId')) {
       throw new ErrorIcr('el ICR no entregó la cookie de sesión al iniciar sesión');
