@@ -1,7 +1,7 @@
 // Pruebas del % inicial con Dhemax:  node --test tools/dhemax_inicial.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { cargasRecientes, decidir } from './dhemax_inicial.mjs';
+import { ATRASO_MAX_MIN, cargasRecientes, corregirInicialDhemax, decidir, siConfiable } from './dhemax_inicial.mjs';
 
 const t = (h, m) => Date.UTC(2026, 10, 25, h + 3, m); // hora de Chile (UTC-3) del 25-11
 const carga = (p, ini, si, fin = ini + 60000, ap = ini + 4 * 60000) => ({ p, ini, si, fin, ap });
@@ -82,4 +82,61 @@ test('cargasRecientes: solo en curso, recién partidas y con %', () => {
     carga('B7-R', t(13, 52), 61, t(14, 9), t(14, 10)), // Dhemax la registró 18 min tarde (SRRX41 25-11: 61 vs 53 real)
   ], ahora);
   assert.deepEqual(l.map((c) => c.p), ['A6-L']);
+});
+
+// Variante más corta de la carga/anotación del archivo: busca la decisión con la anotación a distintos minutos.
+const busA = { ppu: 'SRAA01', coordenada: 'B9-L', pctInicial: 30 };
+test('decidir: anotado a +15 min de que partió la carga corrige; a +16 no', () => {
+  const ini = t(10, 0);
+  const c = carga('B9-L', ini, 45);
+  assert.ok(decidir(busA, c, [anotar(ini + 15 * 60000, 'B9-L', 30)], { 1: c }, null).cambios);
+  assert.match(decidir(busA, c, [anotar(ini + 16 * 60000, 'B9-L', 30)], { 1: c }, null).no, /lejos/);
+  assert.ok(decidir(busA, c, [anotar(ini - 60 * 60000, 'B9-L', 30)], { 1: c }, null).cambios, '60 min antes aún vale');
+  assert.match(decidir(busA, c, [anotar(ini - 61 * 60000, 'B9-L', 30)], { 1: c }, null).no, /lejos/);
+});
+
+test('siConfiable: registrada con 12 min de atraso sí, con 13 no', () => {
+  const ini = t(10, 0);
+  assert.equal(ATRASO_MAX_MIN, 12);
+  assert.equal(siConfiable({ si: 40, ini, ap: ini + 12 * 60000 }), true);
+  assert.equal(siConfiable({ si: 40, ini, ap: ini + 13 * 60000 }), false);
+});
+
+// db simulada: anota qué colecciones se tocaron después de las reglas.
+function dbFalsa({ cerrados = [] } = {}) {
+  const tocadas = [];
+  const cadena = (docs) => {
+    const q = { where: () => q, orderBy: () => q, limit: () => q, get: async () => ({ docs, empty: !docs.length }) };
+    return q;
+  };
+  return {
+    tocadas,
+    doc: (p) => ({ get: async () => ({ data: () => (p === 'config/autoSgdc' ? { activo: true, modo: 'siempre' } : {}) }) }),
+    collection: (n) => {
+      tocadas.push(n);
+      return cadena(n === 'turnos' ? cerrados : []);
+    },
+  };
+}
+const nuevaCarga = (ahora) => carga('B9-L', ahora - 5 * 60000, 40, ahora - 60000, ahora - 5 * 60000 + 3 * 60000);
+
+test('corregirInicialDhemax: entre 20:00 y 20:40 espera al cierre del diurno (no mira el semáforo)', async () => {
+  const ahora = new Date(t(20, 20)); // 20:20 Chile
+  const db = dbFalsa();
+  await corregirInicialDhemax(db, [nuevaCarga(ahora.getTime())], {}, ahora);
+  assert.ok(!db.tocadas.includes('semaforoch'));
+});
+
+test('corregirInicialDhemax: con el turno anterior ya cerrado sigue (mira el semáforo)', async () => {
+  const ahora = new Date(t(20, 20));
+  const db = dbFalsa({ cerrados: [{ data: () => ({ anulado: false, cerradoEn: new Date(ahora.getTime() - 60000) }) }] });
+  await corregirInicialDhemax(db, [nuevaCarga(ahora.getTime())], {}, ahora);
+  assert.ok(db.tocadas.includes('semaforoch'));
+});
+
+test('corregirInicialDhemax: a las 07:35 espera al cierre del nocturno', async () => {
+  const ahora = new Date(t(7, 35));
+  const db = dbFalsa();
+  await corregirInicialDhemax(db, [nuevaCarga(ahora.getTime())], {}, ahora);
+  assert.ok(!db.tocadas.includes('semaforoch'));
 });

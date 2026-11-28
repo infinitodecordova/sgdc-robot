@@ -18,7 +18,7 @@
 // Se apaga desde la app (config/cierreAuto.activo = false).
 
 import {
-  chile, cambiosSgdc, cambiosJornada, condicionDe, jornadaDe, reasignarReservas, ultimoCierre, turnoManual, ETIQUETAS, fmt, yaCerrado,
+  chile, cambiosSgdc, cambiosJornada, condicionDe, condicionPorTaller, estadoTaller, ptDePersona, jornadaDe, reasignarReservas, ultimoCierre, turnoManual, ETIQUETAS, fmt, yaCerrado,
 } from './auto_correccion.mjs';
 import { calzaFinal, cargasDhemaxEntre, emparejar, hayDhemax, marcarEnCurso, PISTOLAS, textoCarga, finalDudoso } from './dhemax_cruce.mjs';
 
@@ -26,8 +26,6 @@ const PERSISTENTES = new Set(['PT', 'AV', 'FS', 'PIEA', 'TSC']);
 // El Power BI se actualiza ~:27/:32. Para cerrar, sus datos tienen que llegar al menos hasta
 // 40 minutos antes del fin del turno; si no, se considera caído.
 const MARGEN_SGDC_MIN = 40;
-// El reporte de taller sirve si tiene menos de 6 horas.
-const MAX_ATRASO_TALLER_H = 6;
 
 // Ventanas de cierre (hora de Chile, HHMM) y fin de cada turno.
 const CIERRE = {
@@ -165,10 +163,13 @@ export async function cierreAutomatico(db, cargas, datosSgdc) {
   const sgdcOk = !!cargas && !!datosSgdc && datosSgdc.getTime() >= hasta.getTime() - MARGEN_SGDC_MIN * 60000;
   const tallerDoc = (await db.doc('taller/flota').get()).data();
   const datosTaller = tallerDoc?.datos?.toDate?.() ?? null;
-  const tallerOk = !!datosTaller && ahora - datosTaller < MAX_ATRASO_TALLER_H * 3600000;
-  const enTaller = new Set(Object.keys(tallerDoc?.buses ?? {}));
+  // Mismas reglas que la corrección automática del taller: atrasado (> 150 min) o vacío = no se toca el PT.
+  const estTaller = estadoTaller(tallerDoc, ahora);
+  const tallerOk = estTaller.ok;
+  const enTaller = estTaller.enTaller;
+  if (estTaller.motivo === 'vacio') console.log('Cierre automático: el reporte de taller no trae buses en taller, no se corrige PT.');
   console.log(`Cierre automático del ${nombre(turno)} ${corta(dia)}: SGDC ${sgdcOk ? 'al día' : 'ATRASADO'}` +
-    ` (${datosSgdc ? hora(datosSgdc) : 'sin datos'}), taller ${tallerOk ? 'al día' : 'ATRASADO'}.`);
+    ` (${datosSgdc ? hora(datosSgdc) : 'sin datos'}), taller ${tallerOk ? 'al día' : estTaller.motivo === 'vacio' ? 'VACÍO' : 'ATRASADO'}.`);
 
   // Cargas del turno por PPU (para corregir: solo las de después del cierre anterior; para kWh: todas).
   const corte = await ultimoCierre(db, id);
@@ -242,12 +243,18 @@ export async function cierreAutomatico(db, cargas, datosSgdc) {
     const ppu = String(b.ppu ?? d.id).toUpperCase().replace(/[^A-Z0-9]/g, '');
     const real = porDhemax.get(d.id);
     const cambios = sgdcOk ? cambiosSgdc(b, paraCorregir.get(ppu) ?? []) : real ? cambiosDhemax(b, real) : {};
+    let porTaller; // quién queda en `condicionPor` si el taller cambió la condición
     if (tallerOk) {
       // La condición Taller va aparte de la carga (igual que la pestaña Taller y la corrección automática).
       const c = cambios.condicion ? cambios.condicion.despues : condicionDe(b);
-      if (enTaller.has(ppu) && !c) cambios.condicion = { antes: b.condicion ?? null, despues: 'PT' };
-      if (!enTaller.has(ppu) && c === 'PT') {
+      if (enTaller.has(ppu) && !c) {
+        cambios.condicion = { antes: b.condicion ?? null, despues: 'PT' };
+        porTaller = condicionPorTaller(cambios, FieldValue.serverTimestamp());
+      }
+      // Un PT puesto a mano por una persona no lo quita el robot aunque ya no esté en el reporte.
+      if (!enTaller.has(ppu) && c === 'PT' && !ptDePersona(b)) {
         cambios.condicion = { antes: b.condicion ?? 'PT', despues: null };
+        porTaller = null;
         if ((cambios.jornada?.despues ?? b.jornada) === 'PT') cambios.jornada = { antes: b.jornada ?? null, despues: null };
       }
     }
@@ -255,6 +262,7 @@ export async function cierreAutomatico(db, cargas, datosSgdc) {
       for (const [k, x] of Object.entries(cambios)) b[k] = x.despues;
       batch.update(d.ref, {
         ...Object.fromEntries(Object.entries(cambios).map(([k, x]) => [k, x.despues])),
+        ...(porTaller !== undefined ? { condicionPor: porTaller } : {}),
         actualizado: FieldValue.serverTimestamp(),
         actualizadoPor: 'robot',
         actualizadoPorNombre: 'Cierre automático',
@@ -323,7 +331,7 @@ export async function cierreAutomatico(db, cargas, datosSgdc) {
       sinPatio: null, cargaInicio: null, cargaFin: null,
       motivo: null, motivoTexto: null, incidencia: null, incidenciaTexto: null, pistolaNueva: null, pctCambio: null, ppuReserva: null, propuesta: null, propuestaDescartada: null,
       ...(PERSISTENTES.has(b.jornada) ? {} : { jornada: null }),
-      ...(mantener ? {} : { condicion: null, lugar: null, observacion: null }),
+      ...(mantener ? {} : { condicion: null, condicionPor: null, lugar: null, observacion: null }),
       actualizado: FieldValue.serverTimestamp(),
       actualizadoPor: 'robot',
       actualizadoPorNombre: 'Cierre automático',

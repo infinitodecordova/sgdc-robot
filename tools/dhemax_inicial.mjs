@@ -12,7 +12,9 @@
 // cierre de turno). Historial "Robot Dhemax".
 // Lecturas: solo cuando hay cargas nuevas (~50 por turno): las reglas (~4) + 1 por pistola + el historial del bus.
 
-import { ETIQUETAS, adminEnTurno, fmt, turnoACorregir, turnoDe, ultimoCierre } from './auto_correccion.mjs';
+import {
+  ETIQUETAS, adminEnTurno, fmt, turnoACorregir, turnoAnteriorEnEspera, turnoDe, turnoManual, ultimoCierre, yaCerrado,
+} from './auto_correccion.mjs';
 
 const TOLERANCIA = 2; // puntos de %
 const RECIENTE_MIN = 30; // carga que partió hace más que esto: ya no se mira (la corrige el SGDC)
@@ -66,8 +68,16 @@ export async function corregirInicialDhemax(db, nuevas, cargas, ahora = new Date
 
   const cfg = (await db.doc('config/autoSgdc').get()).data() ?? {};
   if (!cfg.activo) return console.log('   % inicial Dhemax: corrección automática apagada.');
-  const turno = await turnoACorregir(db, ahora);
+  const manual = await turnoManual(db);
+  const turno = await turnoACorregir(db, ahora, manual);
   if (!turno) return console.log('   % inicial Dhemax: no hay turno iniciado.');
+  // Entre el cambio de turno y el cierre automático el semáforo aún tiene el turno anterior sin cerrar: se espera.
+  if (!manual.manual) {
+    const previo = turnoAnteriorEnEspera(turno, ahora);
+    if (previo && !(await yaCerrado(db, previo.split('_')[1], previo.split('_')[0]))) {
+      return console.log(`   % inicial Dhemax: el turno anterior (${previo}) aún no se cierra; se espera al cierre.`);
+    }
+  }
   if ((cfg.modo ?? 'fueraDeTurno') === 'fueraDeTurno') {
     const quien = await adminEnTurno(db, ahora);
     if (quien) return console.log(`   % inicial Dhemax: no se corrige, ${quien} está en turno.`);

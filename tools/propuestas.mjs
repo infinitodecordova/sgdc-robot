@@ -34,7 +34,8 @@ export function metaYMargen(hmm) {
 export function cargaCortada(c, todas = [], hmDe = (fin) => chile(new Date(fin)).hm) {
   if (!c || c.enCurso || c.continuaEn || c.corte || c.sf == null || c.fin == null) return null;
   if (finalDudoso(c)) return null;
-  const { meta, margen } = metaYMargen(hmDe(c.fin));
+  // La meta se juzga con la hora en que EMPEZÓ la carga (decisión del usuario); sin inicio, la del término.
+  const { meta, margen } = metaYMargen(hmDe(c.ini ?? c.fin));
   const real = c.sf >= 94 ? c.sf + 3 : c.sf;
   if (real >= meta - margen) return null;
   const propias = new Set(c.tr ?? []);

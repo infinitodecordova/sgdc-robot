@@ -320,21 +320,46 @@ export async function autoCorregir(db, cargas) {
 }
 
 // ------------------------------------------------------------ Taller
-const TALLER_VIEJO_MIN = 150; // reporte de taller más viejo que esto: no se corrige con él (igual que la app)
+export const TALLER_VIEJO_MIN = 150; // reporte de taller más viejo que esto: no se corrige con él (igual que la app)
 
 /// Qué cambiarle a un bus según el reporte de taller (lo mismo que el botón de la pestaña Taller). La condición va
 /// aparte de la carga: en taller y sin otra condición → PT (aunque haya cargado); con PT y ya no está en taller → sin
 /// condición (y sin la sigla vieja PT en la jornada).
+/// ¿El PT lo puso a mano una persona? (`condicionPor.uid` distinto de 'robot'). Sin `condicionPor` (datos viejos) = no.
+export function ptDePersona(b) {
+  const uid = b.condicionPor?.uid;
+  return condicionDe(b) === 'PT' && !!uid && uid !== 'robot';
+}
+
+/// Qué guardar en `condicionPor` según los cambios de taller: el robot al poner PT, null al quitarlo, undefined
+/// (no tocar) si la condición no cambió. `fecha` es el serverTimestamp.
+export function condicionPorTaller(cambios, fecha) {
+  if (!cambios.condicion) return undefined;
+  return cambios.condicion.despues === 'PT' ? { uid: 'robot', nombre: 'Robot Taller', fecha } : null;
+}
+
 export function cambiosTaller(b, enTaller) {
   const c = condicionDe(b);
   if (enTaller && !c) return { condicion: { antes: b.condicion ?? null, despues: 'PT' } };
   if (!enTaller && c === 'PT') {
+    if (ptDePersona(b)) return {}; // lo puso una persona: lo quita una persona
     return {
       condicion: { antes: b.condicion ?? 'PT', despues: null },
       ...(b.jornada === 'PT' ? { jornada: { antes: 'PT', despues: null } } : {}),
     };
   }
   return {};
+}
+
+/// ¿Sirve el reporte de taller (`taller/flota`) para corregir? Atrasado (> 150 min) o sin buses en taller (suele ser
+/// una falla del Power BI) = no se toca el PT de nadie. Devuelve { ok, motivo ('atrasado' | 'vacio' | null), enTaller }
+/// con las patentes normalizadas. Lo usan la corrección automática y el cierre automático.
+export function estadoTaller(t, ahora = new Date()) {
+  const datos = t?.datos?.toDate?.() ?? null;
+  const enTaller = new Set(Object.keys(t?.buses ?? {}).map(normaPpu));
+  if (!datos || ahora - datos > TALLER_VIEJO_MIN * 60000) return { ok: false, motivo: 'atrasado', enTaller };
+  if (!enTaller.size) return { ok: false, motivo: 'vacio', enTaller };
+  return { ok: true, motivo: null, enTaller };
 }
 
 /// Corrige la jornada PT del semáforo con el reporte de taller (si el admin la dejó activada en config/autoTaller).
@@ -356,18 +381,17 @@ export async function autoCorregirTaller(db) {
       return;
     }
   }
-  const t = (await db.doc('taller/flota').get()).data() ?? {};
-  const datos = t.datos?.toDate?.() ?? null;
-  if (!datos || ahora - datos > TALLER_VIEJO_MIN * 60000) {
+  const taller = estadoTaller((await db.doc('taller/flota').get()).data() ?? {}, ahora);
+  if (taller.motivo === 'atrasado') {
     console.log('Corrección automática del taller: el reporte de taller está atrasado, no se corrige.');
     return;
   }
-  const enTaller = new Set(Object.keys(t.buses ?? {}).map((p) => p.toUpperCase().replace(/[^A-Z0-9]/g, '')));
-  if (!enTaller.size) {
+  if (taller.motivo === 'vacio') {
     // Un reporte vacío suele ser una falla del Power BI: no se le quita el PT a nadie por eso.
     console.log('Corrección automática del taller: el reporte no trae buses en taller, no se corrige.');
     return;
   }
+  const enTaller = taller.enTaller;
 
   const { FieldValue } = await import('firebase-admin/firestore');
   const buses = await db.collection('semaforoch').get();
@@ -378,8 +402,10 @@ export async function autoCorregirTaller(db) {
     const ppu = String(b.ppu ?? d.id).toUpperCase().replace(/[^A-Z0-9]/g, '');
     const cambios = cambiosTaller(b, enTaller.has(ppu));
     if (!Object.keys(cambios).length) continue;
+    const por = condicionPorTaller(cambios, FieldValue.serverTimestamp());
     batch.update(d.ref, {
       ...Object.fromEntries(Object.entries(cambios).map(([k, v]) => [k, v.despues])),
+      ...(por !== undefined ? { condicionPor: por } : {}),
       actualizado: FieldValue.serverTimestamp(),
       actualizadoPor: 'robot',
       actualizadoPorNombre: 'Robot Taller',
